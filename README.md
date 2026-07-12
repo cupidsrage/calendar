@@ -4,8 +4,8 @@ A shared custody calendar for two parents. Set a normal weekly schedule, switch 
 
 ## Features
 - **Two-parent sign-in** — each parent has a name, color, and PIN. One-time setup screen on first visit.
-- **Custody calendar** — every day is tinted with whoever's day it is, based on your normal weekly pattern. One-off switches (dashed badge) don't touch the pattern.
-- **Appointments** — title, kid, time, notes, and which parent is taking them.
+- **Custody calendar** — week-on/week-off rotation. Pick the exchange day and whose week it is right now; the calendar alternates automatically forever. One-off switches (dashed badge) do not affect the rotation.
+- **Appointments, events & birthdays** — appointments have a responsible parent (and can be swapped); events can belong to one parent or both; birthdays repeat every year and show the kid's age.
 - **Coverage requests** — "Ask ___ to cover" sends a request with an optional message. The other parent gets an inbox badge and can accept ("I'll cover it") or decline. Accepted appointments show a ⇄ handoff mark.
 - **Auto-sync** — the page polls every 25 seconds, so you both see changes without refreshing.
 

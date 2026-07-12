@@ -29,9 +29,10 @@ CREATE TABLE IF NOT EXISTS kids (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS pattern (
-  weekday INTEGER PRIMARY KEY,      -- 0=Sun .. 6=Sat
-  parent_id INTEGER
+CREATE TABLE IF NOT EXISTS schedule (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  anchor_date TEXT NOT NULL,        -- YYYY-MM-DD, first day of a custody week
+  anchor_parent INTEGER NOT NULL    -- whose week starts on anchor_date; alternates every 7 days
 );
 CREATE TABLE IF NOT EXISTS overrides (
   date TEXT PRIMARY KEY,            -- YYYY-MM-DD
@@ -39,12 +40,13 @@ CREATE TABLE IF NOT EXISTS overrides (
 );
 CREATE TABLE IF NOT EXISTS appointments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL DEFAULT 'appointment',  -- appointment | event | birthday
   title TEXT NOT NULL,
   kid_id INTEGER,
-  date TEXT NOT NULL,               -- YYYY-MM-DD
+  date TEXT NOT NULL,               -- YYYY-MM-DD (birthdays recur yearly on MM-DD)
   time TEXT,                        -- HH:MM (optional)
   notes TEXT,
-  parent_id INTEGER NOT NULL,       -- responsible parent
+  parent_id INTEGER,                -- responsible parent (NULL = both/everyone)
   covered_by INTEGER,               -- set when other parent accepted coverage
   created_by INTEGER NOT NULL,
   created_at TEXT NOT NULL
@@ -60,6 +62,24 @@ CREATE TABLE IF NOT EXISTS requests (
   responded_at TEXT
 );
 `);
+
+// Migrate databases created by the earlier weekday-pattern version.
+const apptCols = db.prepare("PRAGMA table_info(appointments)").all();
+if (apptCols.length && !apptCols.some(c => c.name === 'type')) {
+  db.exec(`
+    ALTER TABLE appointments RENAME TO appointments_old;
+    CREATE TABLE appointments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL DEFAULT 'appointment',
+      title TEXT NOT NULL, kid_id INTEGER, date TEXT NOT NULL, time TEXT, notes TEXT,
+      parent_id INTEGER, covered_by INTEGER, created_by INTEGER NOT NULL, created_at TEXT NOT NULL
+    );
+    INSERT INTO appointments (id, title, kid_id, date, time, notes, parent_id, covered_by, created_by, created_at)
+      SELECT id, title, kid_id, date, time, notes, parent_id, covered_by, created_by, created_at FROM appointments_old;
+    DROP TABLE appointments_old;
+    DROP TABLE IF EXISTS pattern;
+  `);
+}
 
 // ---------- helpers ----------
 const now = () => new Date().toISOString();
@@ -133,26 +153,32 @@ app.get('/api/data', auth, (req, res) => {
   if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month=YYYY-MM required' });
   const parents = db.prepare('SELECT id, name, color FROM parents ORDER BY id').all();
   const kids = db.prepare('SELECT * FROM kids ORDER BY name').all();
-  const pattern = db.prepare('SELECT * FROM pattern').all();
+  const schedule = db.prepare('SELECT anchor_date, anchor_parent FROM schedule WHERE id = 1').get() || null;
   const overrides = db.prepare("SELECT * FROM overrides WHERE date LIKE ?").all(month + '%');
-  const appointments = db.prepare(
-    "SELECT * FROM appointments WHERE date LIKE ? ORDER BY date, time IS NULL, time"
-  ).all(month + '%');
+  // Regular items in this month, plus birthdays whose MM matches (they recur yearly).
+  const appointments = db.prepare(`
+    SELECT * FROM appointments
+    WHERE (date LIKE ? AND type != 'birthday')
+       OR (type = 'birthday' AND substr(date, 6, 2) = ?)
+    ORDER BY date, time IS NULL, time
+  `).all(month + '%', month.slice(5, 7));
   const requests = db.prepare(`
     SELECT r.*, a.title, a.date, a.time, a.kid_id
     FROM requests r JOIN appointments a ON a.id = r.appointment_id
     WHERE r.from_parent = ? OR r.to_parent = ?
     ORDER BY r.created_at DESC LIMIT 50
   `).all(req.parentId, req.parentId);
-  res.json({ me: req.parentId, parents, kids, pattern, overrides, appointments, requests });
+  res.json({ me: req.parentId, parents, kids, schedule, overrides, appointments, requests });
 });
 
-// ---------- custody schedule ----------
-app.post('/api/pattern', auth, (req, res) => {
-  const { weekday, parent_id } = req.body || {};
-  if (weekday < 0 || weekday > 6) return res.status(400).json({ error: 'Bad weekday' });
-  db.prepare('INSERT INTO pattern (weekday, parent_id) VALUES (?,?) ON CONFLICT(weekday) DO UPDATE SET parent_id = excluded.parent_id')
-    .run(weekday, parent_id || null);
+// ---------- custody schedule (alternating weeks) ----------
+app.post('/api/schedule', auth, (req, res) => {
+  const { anchor_date, anchor_parent } = req.body || {};
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor_date || '') || !anchor_parent)
+    return res.status(400).json({ error: 'anchor_date and anchor_parent required' });
+  db.prepare(`INSERT INTO schedule (id, anchor_date, anchor_parent) VALUES (1,?,?)
+              ON CONFLICT(id) DO UPDATE SET anchor_date = excluded.anchor_date, anchor_parent = excluded.anchor_parent`)
+    .run(anchor_date, anchor_parent);
   res.json({ ok: true });
 });
 
@@ -183,23 +209,34 @@ app.delete('/api/kids/:id', auth, (req, res) => {
 });
 
 // ---------- appointments ----------
+const ITEM_TYPES = ['appointment', 'event', 'birthday'];
+
 app.post('/api/appointments', auth, (req, res) => {
-  const { title, kid_id, date, time, notes, parent_id } = req.body || {};
+  const { type, title, kid_id, date, time, notes, parent_id } = req.body || {};
   if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(date || ''))
     return res.status(400).json({ error: 'Title and date are required' });
-  const r = db.prepare(`INSERT INTO appointments (title, kid_id, date, time, notes, parent_id, created_by, created_at)
-    VALUES (?,?,?,?,?,?,?,?)`)
-    .run(title.trim(), kid_id || null, date, time || null, notes || null, parent_id || req.parentId, req.parentId, now());
+  const t = ITEM_TYPES.includes(type) ? type : 'appointment';
+  // Appointments need a responsible parent; events can be "both" (null); birthdays never have one.
+  const pid = t === 'birthday' ? null : (t === 'event' ? (parent_id || null) : (parent_id || req.parentId));
+  const r = db.prepare(`INSERT INTO appointments (type, title, kid_id, date, time, notes, parent_id, created_by, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(t, title.trim(), kid_id || null, date, t === 'birthday' ? null : (time || null), notes || null, pid, req.parentId, now());
   res.json({ id: r.lastInsertRowid });
 });
 
 app.put('/api/appointments/:id', auth, (req, res) => {
   const a = db.prepare('SELECT * FROM appointments WHERE id = ?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'Not found' });
-  const { title, kid_id, date, time, notes, parent_id } = req.body || {};
-  db.prepare(`UPDATE appointments SET title=?, kid_id=?, date=?, time=?, notes=?, parent_id=?, covered_by=CASE WHEN parent_id != ? THEN NULL ELSE covered_by END WHERE id=?`)
-    .run(title ?? a.title, kid_id ?? a.kid_id, date ?? a.date, time ?? a.time, notes ?? a.notes,
-         parent_id ?? a.parent_id, parent_id ?? a.parent_id, a.id);
+  const b = req.body || {};
+  const t = ITEM_TYPES.includes(b.type) ? b.type : a.type;
+  let pid = 'parent_id' in b ? b.parent_id : a.parent_id;
+  if (t === 'birthday') pid = null;
+  const changedOwner = pid !== a.parent_id;
+  db.prepare(`UPDATE appointments SET type=?, title=?, kid_id=?, date=?, time=?, notes=?, parent_id=?,
+              covered_by=CASE WHEN ? THEN NULL ELSE covered_by END WHERE id=?`)
+    .run(t, b.title ?? a.title, 'kid_id' in b ? b.kid_id : a.kid_id, b.date ?? a.date,
+         t === 'birthday' ? null : ('time' in b ? b.time : a.time),
+         'notes' in b ? b.notes : a.notes, pid, changedOwner ? 1 : 0, a.id);
   res.json({ ok: true });
 });
 
@@ -215,6 +252,7 @@ app.post('/api/requests', auth, (req, res) => {
   const { appointment_id, message } = req.body || {};
   const a = db.prepare('SELECT * FROM appointments WHERE id = ?').get(appointment_id);
   if (!a) return res.status(404).json({ error: 'Appointment not found' });
+  if (!a.parent_id) return res.status(400).json({ error: 'This item has no responsible parent to swap' });
   const to = otherParent(req.parentId);
   if (!to) return res.status(400).json({ error: 'No other parent configured' });
   const dupe = db.prepare("SELECT id FROM requests WHERE appointment_id=? AND status='pending'").get(appointment_id);

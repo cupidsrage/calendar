@@ -109,9 +109,10 @@ function renderApp(preserve){
     <button class="btn small" id="signout">Sign out</button>
   </header>
   <div class="legend">
-    ${D.parents.map(p=>`<span><i style="background:${p.color}"></i>${esc(p.name)}'s day</span>`).join('')}
+    ${D.parents.map(p=>`<span><i style="background:${p.color}"></i>${esc(p.name)}'s week</span>`).join('')}
     <span><i style="background:#fff;border:2px dashed #999"></i>coverage pending</span>
     <span><i style="background:#fff;border:2px dashed var(--ink)"></i>switched day</span>
+    <span>🎂 birthday</span>
   </div>
   <div class="cal-wrap">
     <div class="dow">${DOWS.map(d=>`<div>${d}</div>`).join('')}</div>
@@ -144,16 +145,19 @@ function renderGrid(){
   for(let d=1;d<=days;d++){
     const ds=`${y}-${pad(m+1)}-${pad(d)}`;
     const c=custodyFor(ds), cp=c.pid?parent(c.pid):null;
-    const appts=D.appointments.filter(a=>a.date===ds);
+    const appts=itemsOn(ds);
     const shown=appts.slice(0,3);
     html+=`
     <button class="day ${ds===tstr?'today':''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
       <span class="num">${d}</span>
       ${cp?`<span class="who ${c.override?'override':''}" style="background:${cp.color}">${esc(cp.name[0])}</span>`:''}
       ${shown.map(a=>{
-        const owner=parent(a.covered_by||a.parent_id);
+        if(a.type==='birthday')
+          return `<span class="chip bday">🎂 ${esc(a.title)}</span>`;
+        const pid=a.covered_by||a.parent_id;
+        const bg=pid?parent(pid).color:'var(--muted)';
         const pend=D.requests.some(r=>r.appointment_id===a.id&&r.status==='pending');
-        return `<span class="chip ${pend?'pending':''}" style="background:${owner.color}">
+        return `<span class="chip ${pend?'pending':''}" style="background:${bg}">
           ${a.covered_by?'⇄ ':''}${a.time?`<span class="t">${fmtTime(a.time)}</span>`:''}${esc(a.title)}</span>`;
       }).join('')}
       ${appts.length>3?`<span class="more">+${appts.length-3} more</span>`:''}
@@ -174,33 +178,45 @@ function showSheet(id){ closeSheets(); $('#overlay').classList.add('open'); $(id
 function openDay(ds){
   openDate=ds;
   const c=custodyFor(ds), cp=c.pid?parent(c.pid):null, o=other();
-  const appts=D.appointments.filter(a=>a.date===ds);
+  const appts=itemsOn(ds);
   const sheet=$('#daysheet');
   sheet.innerHTML=`
   <header><h2 class="display">${fmtDate(ds)}</h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
     <div class="custody-row">
       ${cp?`<span class="custody-tag" style="background:${cp.color}">${esc(cp.name)}'s day${c.override?' (switched)':''}</span>`
-          :`<span class="empty">No custody set for this weekday</span>`}
+          :`<span class="empty">No custody schedule set yet — set it in ⚙ settings</span>`}
       ${cp?`<button class="btn small" id="d-switch">Switch to ${esc(parent(c.pid===D.parents[0].id?D.parents[1].id:D.parents[0].id).name)}</button>`:''}
       ${c.override?`<button class="btn small" id="d-reset">Back to normal schedule</button>`:''}
     </div>
 
-    <div class="section-h">Appointments</div>
-    ${appts.length?appts.map(a=>apptCard(a)).join(''):`<div class="empty">Nothing scheduled.</div>`}
+    <div class="section-h">On this day</div>
+    ${appts.length?appts.map(a=>apptCard(a,ds)).join(''):`<div class="empty">Nothing scheduled.</div>`}
 
-    <div class="section-h">${editingId?'Edit appointment':'Add appointment'}</div>
+    <div class="section-h">${editingId?'Edit':'Add something'}</div>
+    <div class="field"><label>What is it</label>
+      <select id="a-type">
+        <option value="appointment">Appointment</option>
+        <option value="event">Event</option>
+        <option value="birthday">Birthday (repeats every year)</option>
+      </select>
+    </div>
     <div class="field"><label>Title</label><input id="a-title" placeholder="e.g. Dentist"></div>
     <div class="field"><label>Kid</label>
       <select id="a-kid"><option value="">—</option>${D.kids.map(k=>`<option value="${k.id}">${esc(k.name)}</option>`).join('')}</select>
     </div>
-    <div class="field"><label>Time</label><input id="a-time" type="time"></div>
-    <div class="field"><label>Who's taking them</label>
-      <select id="a-parent">${D.parents.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <div class="field" id="f-bdate" style="display:none"><label>Birth date (year included, so we can show their age)</label>
+      <input id="a-bdate" type="date"></div>
+    <div class="field" id="f-time"><label>Time</label><input id="a-time" type="time"></div>
+    <div class="field" id="f-parent"><label>Who's taking them</label>
+      <select id="a-parent">
+        <option value="" id="opt-both" hidden>Both / everyone</option>
+        ${D.parents.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}
+      </select>
     </div>
     <div class="field"><label>Notes</label><textarea id="a-notes" rows="2" placeholder="Address, what to bring…"></textarea></div>
     <div style="display:flex; gap:8px">
-      <button class="btn primary" id="a-save">${editingId?'Save changes':'Add appointment'}</button>
+      <button class="btn primary" id="a-save">${editingId?'Save changes':'Add it'}</button>
       ${editingId?`<button class="btn" id="a-cancel">Cancel edit</button>`:''}
     </div>
     <div class="err" id="a-err"></div>
@@ -208,11 +224,26 @@ function openDay(ds){
   showSheet('#daysheet');
   sheet.querySelector('.x').onclick=closeSheets;
   $('#a-parent').value = c.pid || D.me;
+  $('#a-bdate').value = ds;
+
+  const syncType=()=>{
+    const t=$('#a-type').value;
+    $('#f-time').style.display   = t==='birthday'?'none':'';
+    $('#f-parent').style.display = t==='birthday'?'none':'';
+    $('#f-bdate').style.display  = t==='birthday'?'':'none';
+    $('#opt-both').hidden = t!=='event';
+    $('#a-title').placeholder = t==='birthday'?"e.g. Ava's birthday":t==='event'?'e.g. School play':'e.g. Dentist';
+    $('#f-parent').querySelector('label').textContent = t==='event'?"Who's on it":"Who's taking them";
+    if(t!=='event' && !$('#a-parent').value) $('#a-parent').value = c.pid || D.me;
+  };
+  $('#a-type').onchange=syncType;
+  syncType();
 
   if (editingId){
     const a=D.appointments.find(x=>x.id===editingId);
-    if(a){ $('#a-title').value=a.title; $('#a-kid').value=a.kid_id||''; $('#a-time').value=a.time||'';
-           $('#a-parent').value=a.parent_id; $('#a-notes').value=a.notes||''; }
+    if(a){ $('#a-type').value=a.type||'appointment'; syncType();
+           $('#a-title').value=a.title; $('#a-kid').value=a.kid_id||''; $('#a-time').value=a.time||'';
+           $('#a-parent').value=a.parent_id||''; $('#a-notes').value=a.notes||''; $('#a-bdate').value=a.date; }
     $('#a-cancel').onclick=()=>{ editingId=null; openDay(ds); };
   }
 
@@ -227,9 +258,14 @@ function openDay(ds){
   };
 
   $('#a-save').onclick=async()=>{
-    const body={ title:$('#a-title').value.trim(), kid_id:+$('#a-kid').value||null, date:ds,
-                 time:$('#a-time').value||null, notes:$('#a-notes').value.trim()||null, parent_id:+$('#a-parent').value };
+    const t=$('#a-type').value;
+    const body={ type:t, title:$('#a-title').value.trim(), kid_id:+$('#a-kid').value||null,
+                 date: t==='birthday' ? $('#a-bdate').value : ds,
+                 time:$('#a-time').value||null, notes:$('#a-notes').value.trim()||null,
+                 parent_id:+$('#a-parent').value||null };
     if(!body.title){ $('#a-err').textContent='Give it a title.'; return; }
+    if(t==='birthday'&&!body.date){ $('#a-err').textContent='Pick the birth date.'; return; }
+    if(t==='appointment'&&!body.parent_id){ $('#a-err').textContent='Pick who is taking them.'; return; }
     try{
       if(editingId) await api('/api/appointments/'+editingId,{method:'PUT',body});
       else await api('/api/appointments',{method:'POST',body});
@@ -258,26 +294,39 @@ function openDay(ds){
   });
 }
 
-function apptCard(a){
-  const owner=parent(a.parent_id), kid=D.kids.find(k=>k.id===a.kid_id);
+function apptCard(a, ds){
+  const kid=D.kids.find(k=>k.id===a.kid_id);
+  const baseActions=`<button class="btn small" data-act="edit" data-id="${a.id}">Edit</button>
+                     <button class="btn small danger" data-act="del" data-id="${a.id}">Delete</button>`;
+
+  if(a.type==='birthday'){
+    const age=bdayAge(a, ds||a.date);
+    return `<div class="appt">
+      <div class="top"><b>🎂 ${esc(a.title)}</b>${age?`<span>turning ${age}</span>`:''}</div>
+      <div class="meta">${kid?esc(kid.name)+' · ':''}repeats every year${a.notes?' · '+esc(a.notes):''}</div>
+      <div class="actions">${baseActions}</div>
+    </div>`;
+  }
+
+  const owner=a.parent_id?parent(a.parent_id):null;
   const pend=D.requests.find(r=>r.appointment_id===a.id&&r.status==='pending');
   const mine=(a.covered_by||a.parent_id)===D.me;
   let swap='';
   if(a.covered_by) swap=`<div class="swap">⇄ Covered by ${esc(parent(a.covered_by).name)}</div>`;
   else if(pend) swap=`<div class="swap pending">⇄ Waiting on ${esc(parent(pend.to_parent).name)} to respond</div>`;
-  let actions=`<button class="btn small" data-act="edit" data-id="${a.id}">Edit</button>
-               <button class="btn small danger" data-act="del" data-id="${a.id}">Delete</button>`;
+  let actions=baseActions;
   if(pend && pend.to_parent===D.me)
     actions=`<button class="btn small primary" data-act="accept" data-id="${pend.id}">I'll cover it</button>
              <button class="btn small" data-act="decline" data-id="${pend.id}">Can't</button>`+actions;
   else if(pend && pend.from_parent===D.me)
     actions=`<button class="btn small" data-act="cancelreq" data-id="${pend.id}">Cancel request</button>`+actions;
-  else if(mine && !a.covered_by)
+  else if(owner && mine && !a.covered_by)
     actions=`<button class="btn small" data-act="ask" data-id="${a.id}">Ask ${esc(other().name)} to cover</button>`+actions;
   return `<div class="appt">
     <div class="top"><b>${esc(a.title)}</b>${a.time?`<span>${fmtTime(a.time)}</span>`:''}</div>
-    <div class="meta">${kid?esc(kid.name)+' · ':''}${a.notes?esc(a.notes):''}</div>
-    <span class="own" style="background:${owner.color}">${esc(owner.name)} is taking them</span>
+    <div class="meta">${a.type==='event'?'Event · ':''}${kid?esc(kid.name)+' · ':''}${a.notes?esc(a.notes):''}</div>
+    ${owner?`<span class="own" style="background:${owner.color}">${esc(owner.name)} ${a.type==='event'?'is on it':'is taking them'}</span>`
+           :`<span class="own" style="background:var(--muted)">Both / everyone</span>`}
     ${swap}<div class="actions">${actions}</div>
   </div>`;
 }
@@ -333,17 +382,15 @@ function openSettings(){
   sheet.innerHTML=`
   <header><h2 class="display">Schedule & kids</h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
-    <div class="section-h">Normal week — whose day is it?</div>
-    <div class="patt">
-      ${DOWS.map((d,i)=>{
-        const cur=D.pattern.find(p=>p.weekday===i)?.parent_id||'';
-        return `<div class="cell">${d}<select data-wd="${i}">
-          <option value="">—</option>
-          ${D.parents.map(p=>`<option value="${p.id}" ${p.id===cur?'selected':''}>${esc(p.name)}</option>`).join('')}
-        </select></div>`;
-      }).join('')}
+    <div class="section-h">Custody — week on / week off</div>
+    <div class="field"><label>Exchange day (the day the kids switch houses)</label>
+      <select id="sc-dow">${DOWS.map((d,i)=>`<option value="${i}">${d}</option>`).join('')}</select>
     </div>
-    <p class="empty" style="margin-bottom:6px">One-off switches are done from the day itself (open a day → Switch).</p>
+    <div class="field"><label>Whose week is it right now?</label>
+      <select id="sc-who">${D.parents.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    </div>
+    <button class="btn primary" id="sc-save" style="width:100%">Save schedule</button>
+    <p class="empty" style="margin:8px 0 6px">Weeks alternate automatically from there, forever. One-off switches are done from the day itself (open a day → Switch).</p>
     <div class="section-h">Kids</div>
     <div id="kidlist">${D.kids.map(k=>`<div class="kidrow"><span>${esc(k.name)}</span>
       <button class="btn small danger" data-kid="${k.id}">Remove</button></div>`).join('')||'<div class="empty">No kids added yet.</div>'}</div>
@@ -351,12 +398,21 @@ function openSettings(){
   </div>`;
   showSheet('#setsheet');
   sheet.querySelector('.x').onclick=closeSheets;
-  sheet.querySelectorAll('select[data-wd]').forEach(s=>{
-    s.onchange=async()=>{
-      await api('/api/pattern',{method:'POST',body:{weekday:+s.dataset.wd,parent_id:+s.value||null}});
-      await refresh(); renderApp(); openSettings(); toast('Schedule updated');
-    };
-  });
+  // Preselect current schedule values if set
+  if(D.schedule){
+    $('#sc-dow').value = new Date(D.schedule.anchor_date+'T12:00:00').getDay();
+    $('#sc-who').value = custodyFor(todayStr()).pid || D.schedule.anchor_parent;
+  }
+  $('#sc-save').onclick=async()=>{
+    const dow=+$('#sc-dow').value, who=+$('#sc-who').value;
+    // Anchor = most recent exchange day on or before today; that week belongs to `who`.
+    const t=new Date(); t.setHours(12,0,0,0);
+    const back=(t.getDay()-dow+7)%7;
+    t.setDate(t.getDate()-back);
+    const anchor=`${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;
+    await api('/api/schedule',{method:'POST',body:{anchor_date:anchor,anchor_parent:who}});
+    await refresh(); renderApp(); openSettings(); toast('Schedule saved');
+  };
   $('#k-add').onclick=async()=>{
     const name=$('#k-name').value.trim(); if(!name) return;
     await api('/api/kids',{method:'POST',body:{name}});

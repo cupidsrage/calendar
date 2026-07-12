@@ -108,6 +108,7 @@ header.app{
 }
 .chip .t{opacity:.85; font-weight:500}
 .chip.pending{outline:2px dashed rgba(0,0,0,.4); outline-offset:-2px}
+.chip.bday{background:#fff; color:var(--ink); border:1px solid var(--line)}
 .more{font-size:11px; color:var(--muted); font-weight:600}
 
 /* ---------- panels ---------- */
@@ -215,9 +216,24 @@ function other(){ return D.parents.find(p=>p.id!==D.me); }
 function custodyFor(ds){
   const ov = D.overrides.find(o=>o.date===ds);
   if (ov) return { pid: ov.parent_id, override:true };
-  const wd = new Date(ds+'T12:00:00').getDay();
-  const pr = D.pattern.find(p=>p.weekday===wd);
-  return { pid: pr?.parent_id || null, override:false };
+  if (!D.schedule) return { pid:null, override:false };
+  const a = new Date(D.schedule.anchor_date+'T12:00:00');
+  const d = new Date(ds+'T12:00:00');
+  const wk = Math.floor(Math.round((d-a)/86400000)/7);
+  const even = ((wk%2)+2)%2 === 0;
+  const pid = even ? D.schedule.anchor_parent
+                   : D.parents.find(p=>p.id!==D.schedule.anchor_parent)?.id || null;
+  return { pid, override:false };
+}
+// Items landing on a date; birthdays match month+day every year.
+function itemsOn(ds){
+  return D.appointments.filter(a =>
+    a.type==='birthday' ? a.date.slice(5)===ds.slice(5) : a.date===ds
+  );
+}
+function bdayAge(a, ds){
+  const by=+a.date.slice(0,4), y=+ds.slice(0,4);
+  return (y>by) ? (y-by) : null;
 }
 function tint(hex, a){
   const n=parseInt(hex.slice(1),16), r=n>>16, g=(n>>8)&255, b=n&255;
