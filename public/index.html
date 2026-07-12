@@ -107,8 +107,27 @@ header.app{
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:flex; gap:4px; align-items:center;
 }
 .chip .t{opacity:.85; font-weight:500}
-.chip.pending{outline:2px dashed rgba(0,0,0,.4); outline-offset:-2px}
+.chip.pending{outline:2px dashed rgba(0,0,0,.4); outline-offset:-2px; opacity:.75}
 .chip.bday{background:#fff; color:var(--ink); border:1px solid var(--line)}
+.day.pendingswap{box-shadow:inset 0 0 0 2px #C0702A}
+.swaptag{position:absolute; bottom:5px; right:6px; font-size:10px; font-weight:700;
+  background:#C0702A; color:#fff; border-radius:5px; padding:1px 5px}
+
+/* pending boxes */
+.pendbox{background:#FDF3E7; border:1px solid #E8CFA8; border-radius:10px; padding:12px; margin-bottom:16px}
+.pendbox.tight{margin:8px 0 0; padding:9px 10px}
+.pendhead{font-weight:700; font-size:14px; color:#6A4A18; margin-bottom:4px}
+.pendbody{font-size:13.5px; color:#6A4A18}
+.pendmsg{font-size:13.5px; background:#fff; border-radius:7px; padding:7px 9px; margin-top:6px; color:var(--ink)}
+.pendbox .actions{display:flex; gap:8px; margin-top:10px}
+.appt.ispending{border-color:#E8CFA8; background:#FFFDF9}
+.own.unsettled{background:#fff !important; border:1.5px dashed; font-weight:700}
+.hint{font-size:13px; color:#6A4A18; background:#FDF3E7; border-radius:8px; padding:8px 10px;
+  margin-bottom:12px; display:none}
+.hint:not(:empty){display:block}
+.req.needsme{border-color:#E8CFA8; background:#FFFDF9}
+.tag{display:inline-block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+  background:#F0E4CF; color:#6A4A18; border-radius:5px; padding:1px 6px; margin-top:4px}
 .more{font-size:11px; color:var(--muted); font-weight:600}
 
 /* ---------- panels ---------- */
@@ -156,6 +175,10 @@ header.app{
 .kidrow span{margin-right:auto}
 .addkid{display:flex; gap:8px; margin-top:10px}
 .addkid input{flex:1; border:1px solid var(--line); border-radius:8px; padding:7px 10px}
+.check{display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer}
+.check input{width:16px; height:16px; accent-color:var(--ink)}
+.warn{background:#FDF3E7; border:1px solid #E8CFA8; color:#6A4A18; border-radius:8px;
+  padding:10px 12px; font-size:13.5px; margin-bottom:14px}
 
 .toast{
   position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--paper);
@@ -215,15 +238,16 @@ function parent(id){ return D?.parents.find(p=>p.id===id) || {name:'?',color:'#8
 function other(){ return D.parents.find(p=>p.id!==D.me); }
 function custodyFor(ds){
   const ov = D.overrides.find(o=>o.date===ds);
-  if (ov) return { pid: ov.parent_id, override:true };
-  if (!D.schedule) return { pid:null, override:false };
+  const pendingSwap = (D.pending||[]).find(p=>p.kind==='swap_day'&&p.date===ds);
+  if (ov) return { pid: ov.parent_id, override:true, pendingSwap };
+  if (!D.schedule) return { pid:null, override:false, pendingSwap };
   const a = new Date(D.schedule.anchor_date+'T12:00:00');
   const d = new Date(ds+'T12:00:00');
   const wk = Math.floor(Math.round((d-a)/86400000)/7);
   const even = ((wk%2)+2)%2 === 0;
   const pid = even ? D.schedule.anchor_parent
                    : D.parents.find(p=>p.id!==D.schedule.anchor_parent)?.id || null;
-  return { pid, override:false };
+  return { pid, override:false, pendingSwap };
 }
 // Items landing on a date; birthdays match month+day every year.
 function itemsOn(ds){
@@ -235,6 +259,10 @@ function bdayAge(a, ds){
   const by=+a.date.slice(0,4), y=+ds.slice(0,4);
   return (y>by) ? (y-by) : null;
 }
+// The pending proposal (if any) attached to an appointment.
+function pendingFor(id){ return (D.pending||[]).find(p=>p.appointment_id===id); }
+// Everything waiting on ME to answer.
+function myInbox(){ return (D.pending||[]).filter(p=>p.to_parent===D.me); }
 function tint(hex, a){
   const n=parseInt(hex.slice(1),16), r=n>>16, g=(n>>8)&255, b=n&255;
   return `rgba(${r},${g},${b},${a})`;

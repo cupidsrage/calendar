@@ -23,6 +23,7 @@ function renderSetup(){
       <div class="parent-box">
         <h3>Parent ${i+1}</h3>
         <div class="field"><label>Name</label><input id="s-name-${i}" placeholder="${i===0?'e.g. Blake':'e.g. Sam'}"></div>
+        <div class="field"><label>Email (for notifications)</label><input id="s-email-${i}" type="email" placeholder="name@email.com"></div>
         <div class="field"><label>Color</label>
           <div class="swatches" id="s-col-${i}">
             ${colors.map((c,j)=>`<button type="button" class="swatch ${j===i?'sel':''}" data-c="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}
@@ -44,6 +45,7 @@ function renderSetup(){
   $('#s-go').onclick = async ()=>{
     const parents=[0,1].map(i=>({
       name: $(`#s-name-${i}`).value.trim(),
+      email: $(`#s-email-${i}`).value.trim(),
       pin: $(`#s-pin-${i}`).value.trim(),
       color: $(`#s-col-${i} .sel`).dataset.c
     }));
@@ -93,7 +95,7 @@ function renderApp(preserve){
   const wasOpen = preserve && document.querySelector('.sheet.open')?.id;
   document.documentElement.style.setProperty('--p1', D.parents[0]?.color || '#2F6D62');
   document.documentElement.style.setProperty('--p2', D.parents[1]?.color || '#C0702A');
-  const inboxCount = D.requests.filter(r=>r.status==='pending' && r.to_parent===D.me).length;
+  const inboxCount = myInbox().length;
 
   $('#app').innerHTML = `
   <header class="app">
@@ -104,14 +106,15 @@ function renderApp(preserve){
       <button class="iconbtn" id="next" aria-label="Next month">›</button>
       <button class="btn small" id="today">Today</button>
     </div>
-    <button class="iconbtn" id="inbox" aria-label="Coverage requests">⇄${inboxCount?`<span class="badge">${inboxCount}</span>`:''}</button>
+    <button class="iconbtn" id="inbox" aria-label="Approvals">⏳${inboxCount?`<span class="badge">${inboxCount}</span>`:''}</button>
     <button class="iconbtn" id="settings" aria-label="Settings">⚙</button>
     <button class="btn small" id="signout">Sign out</button>
   </header>
   <div class="legend">
     ${D.parents.map(p=>`<span><i style="background:${p.color}"></i>${esc(p.name)}'s week</span>`).join('')}
-    <span><i style="background:#fff;border:2px dashed #999"></i>coverage pending</span>
-    <span><i style="background:#fff;border:2px dashed var(--ink)"></i>switched day</span>
+    <span>⏳ waiting on approval</span>
+    <span><i style="background:#9AA093"></i>unassigned</span>
+    <span><i style="background:#fff;border:2px dashed var(--ink)"></i>swapped day</span>
     <span>🎂 birthday</span>
   </div>
   <div class="cal-wrap">
@@ -148,17 +151,17 @@ function renderGrid(){
     const appts=itemsOn(ds);
     const shown=appts.slice(0,3);
     html+=`
-    <button class="day ${ds===tstr?'today':''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
+    <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
       <span class="num">${d}</span>
       ${cp?`<span class="who ${c.override?'override':''}" style="background:${cp.color}">${esc(cp.name[0])}</span>`:''}
+      ${c.pendingSwap?`<span class="swaptag">swap?</span>`:''}
       ${shown.map(a=>{
         if(a.type==='birthday')
           return `<span class="chip bday">🎂 ${esc(a.title)}</span>`;
-        const pid=a.covered_by||a.parent_id;
-        const bg=pid?parent(pid).color:'var(--muted)';
-        const pend=D.requests.some(r=>r.appointment_id===a.id&&r.status==='pending');
-        return `<span class="chip ${pend?'pending':''}" style="background:${bg}">
-          ${a.covered_by?'⇄ ':''}${a.time?`<span class="t">${fmtTime(a.time)}</span>`:''}${esc(a.title)}</span>`;
+        const bg=a.parent_id?parent(a.parent_id).color:'#9AA093';
+        const unsettled=!a.confirmed||!!pendingFor(a.id);
+        return `<span class="chip ${unsettled?'pending':''}" style="background:${bg}">
+          ${unsettled?'⏳ ':''}${a.time?`<span class="t">${fmtTime(a.time)}</span>`:''}${esc(a.title)}</span>`;
       }).join('')}
       ${appts.length>3?`<span class="more">+${appts.length-3} more</span>`:''}
     </button>`;
@@ -179,16 +182,34 @@ function openDay(ds){
   openDate=ds;
   const c=custodyFor(ds), cp=c.pid?parent(c.pid):null, o=other();
   const appts=itemsOn(ds);
+  const ps=c.pendingSwap;
+  const swapTarget = c.pid===D.parents[0].id?D.parents[1].id:D.parents[0].id;
   const sheet=$('#daysheet');
+
+  let swapUI='';
+  if(ps){
+    const mineToAnswer = ps.to_parent===D.me;
+    swapUI = `<div class="pendbox">
+      <div class="pendhead">⏳ ${mineToAnswer?`${esc(parent(ps.from_parent).name)} wants to swap this day`:`Waiting on ${esc(parent(ps.to_parent).name)}`}</div>
+      <div class="pendbody">Would become <b>${ps.to_parent_on_date?esc(parent(ps.to_parent_on_date).name)+"'s day":'the normal rotation'}</b>. Nothing changes until it's accepted.</div>
+      ${ps.message?`<div class="pendmsg">"${esc(ps.message)}"</div>`:''}
+      <div class="actions">${mineToAnswer
+        ? `<button class="btn small primary" data-p="${ps.id}" data-pa="accept">Accept swap</button>
+           <button class="btn small" data-p="${ps.id}" data-pa="decline">Decline</button>`
+        : `<button class="btn small" data-p="${ps.id}" data-pa="cancel">Withdraw</button>`}</div>
+    </div>`;
+  }
+
   sheet.innerHTML=`
   <header><h2 class="display">${fmtDate(ds)}</h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
     <div class="custody-row">
-      ${cp?`<span class="custody-tag" style="background:${cp.color}">${esc(cp.name)}'s day${c.override?' (switched)':''}</span>`
+      ${cp?`<span class="custody-tag" style="background:${cp.color}">${esc(cp.name)}'s day${c.override?' (swapped)':''}</span>`
           :`<span class="empty">No custody schedule set yet — set it in ⚙ settings</span>`}
-      ${cp?`<button class="btn small" id="d-switch">Switch to ${esc(parent(c.pid===D.parents[0].id?D.parents[1].id:D.parents[0].id).name)}</button>`:''}
-      ${c.override?`<button class="btn small" id="d-reset">Back to normal schedule</button>`:''}
+      ${cp&&!ps?`<button class="btn small" id="d-swap">Ask to swap to ${esc(parent(swapTarget).name)}</button>`:''}
+      ${c.override&&!ps?`<button class="btn small" id="d-reset">Ask to undo swap</button>`:''}
     </div>
+    ${swapUI}
 
     <div class="section-h">On this day</div>
     ${appts.length?appts.map(a=>apptCard(a,ds)).join(''):`<div class="empty">Nothing scheduled.</div>`}
@@ -210,10 +231,13 @@ function openDay(ds){
     <div class="field" id="f-time"><label>Time</label><input id="a-time" type="time"></div>
     <div class="field" id="f-parent"><label>Who's taking them</label>
       <select id="a-parent">
-        <option value="" id="opt-both" hidden>Both / everyone</option>
-        ${D.parents.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}
+        <option value="">Nobody yet / both</option>
+        ${D.parents.map(p=>`<option value="${p.id}">${esc(p.name)}${p.id===D.me?' (me)':''}</option>`).join('')}
       </select>
     </div>
+    <div class="field" id="f-msg" style="display:none"><label>Note to ${esc(o.name)} (optional)</label>
+      <input id="a-msg" placeholder="e.g. I'm stuck at work that afternoon"></div>
+    <div class="hint" id="a-hint"></div>
     <div class="field"><label>Notes</label><textarea id="a-notes" rows="2" placeholder="Address, what to bring…"></textarea></div>
     <div style="display:flex; gap:8px">
       <button class="btn primary" id="a-save">${editingId?'Save changes':'Add it'}</button>
@@ -231,30 +255,48 @@ function openDay(ds){
     $('#f-time').style.display   = t==='birthday'?'none':'';
     $('#f-parent').style.display = t==='birthday'?'none':'';
     $('#f-bdate').style.display  = t==='birthday'?'':'none';
-    $('#opt-both').hidden = t!=='event';
     $('#a-title').placeholder = t==='birthday'?"e.g. Ava's birthday":t==='event'?'e.g. School play':'e.g. Dentist';
-    $('#f-parent').querySelector('label').textContent = t==='event'?"Who's on it":"Who's taking them";
-    if(t!=='event' && !$('#a-parent').value) $('#a-parent').value = c.pid || D.me;
+    syncOwner();
+  };
+  // Assigning the other parent turns this into a request that needs their OK.
+  const syncOwner=()=>{
+    const t=$('#a-type').value;
+    const needsOk = t!=='birthday' && +$('#a-parent').value===o.id;
+    $('#f-msg').style.display = needsOk?'':'none';
+    $('#a-hint').textContent = needsOk
+      ? `${o.name} has to accept this before it's on her. It'll show as pending until she does.`
+      : '';
+    $('#a-save').textContent = needsOk ? (editingId?`Send change to ${o.name}`:`Ask ${o.name} to take it`)
+                                       : (editingId?'Save changes':'Add it');
   };
   $('#a-type').onchange=syncType;
+  $('#a-parent').onchange=syncOwner;
   syncType();
 
   if (editingId){
     const a=D.appointments.find(x=>x.id===editingId);
-    if(a){ $('#a-type').value=a.type||'appointment'; syncType();
+    if(a){ $('#a-type').value=a.type||'appointment';
            $('#a-title').value=a.title; $('#a-kid').value=a.kid_id||''; $('#a-time').value=a.time||'';
-           $('#a-parent').value=a.parent_id||''; $('#a-notes').value=a.notes||''; $('#a-bdate').value=a.date; }
+           $('#a-parent').value=a.parent_id||''; $('#a-notes').value=a.notes||''; $('#a-bdate').value=a.date;
+           syncType(); }
     $('#a-cancel').onclick=()=>{ editingId=null; openDay(ds); };
   }
 
-  if($('#d-switch')) $('#d-switch').onclick=async()=>{
-    const to = c.pid===D.parents[0].id?D.parents[1].id:D.parents[0].id;
-    await api('/api/override',{method:'POST',body:{date:ds,parent_id:to}});
-    await refresh(); renderApp(); openDay(ds); toast('Day switched');
+  if($('#d-swap')) $('#d-swap').onclick=async()=>{
+    const msg=prompt(`Ask ${o.name} to swap this day to ${parent(swapTarget).name}. Note (optional):`,'');
+    if(msg===null) return;
+    try{
+      await api('/api/swap',{method:'POST',body:{date:ds,parent_id:swapTarget,message:msg.trim()||null}});
+      await refresh(); renderApp(); openDay(ds); toast(`Swap sent to ${o.name}`);
+    }catch(e){ toast(e.error||'Could not send'); }
   };
   if($('#d-reset')) $('#d-reset').onclick=async()=>{
-    await api('/api/override',{method:'POST',body:{date:ds,parent_id:null}});
-    await refresh(); renderApp(); openDay(ds); toast('Back to normal schedule');
+    const msg=prompt(`Ask ${o.name} to put this day back on the normal rotation. Note (optional):`,'');
+    if(msg===null) return;
+    try{
+      await api('/api/swap',{method:'POST',body:{date:ds,parent_id:null,message:msg.trim()||null}});
+      await refresh(); renderApp(); openDay(ds); toast(`Sent to ${o.name}`);
+    }catch(e){ toast(e.error||'Could not send'); }
   };
 
   $('#a-save').onclick=async()=>{
@@ -262,36 +304,57 @@ function openDay(ds){
     const body={ type:t, title:$('#a-title').value.trim(), kid_id:+$('#a-kid').value||null,
                  date: t==='birthday' ? $('#a-bdate').value : ds,
                  time:$('#a-time').value||null, notes:$('#a-notes').value.trim()||null,
-                 parent_id:+$('#a-parent').value||null };
+                 parent_id:+$('#a-parent').value||null,
+                 message:$('#a-msg').value.trim()||null };
     if(!body.title){ $('#a-err').textContent='Give it a title.'; return; }
     if(t==='birthday'&&!body.date){ $('#a-err').textContent='Pick the birth date.'; return; }
-    if(t==='appointment'&&!body.parent_id){ $('#a-err').textContent='Pick who is taking them.'; return; }
     try{
-      if(editingId) await api('/api/appointments/'+editingId,{method:'PUT',body});
-      else await api('/api/appointments',{method:'POST',body});
-      editingId=null; await refresh(); renderApp(); openDay(ds); toast('Saved');
+      let r;
+      if(editingId) r = await api('/api/appointments/'+editingId,{method:'PUT',body});
+      else r = await api('/api/appointments',{method:'POST',body});
+      editingId=null; await refresh(); renderApp(); openDay(ds);
+      toast(r.pending?`Sent to ${o.name} — waiting on her OK`:'Saved');
     }catch(e){ $('#a-err').textContent=e.error||'Could not save'; }
   };
 
+  // Proposal buttons inside the swap box.
+  sheet.querySelectorAll('[data-p]').forEach(b=>{
+    b.onclick=async()=>{
+      try{ await respondProposal(b.dataset.p, b.dataset.pa);
+           await refresh(); renderApp(); openDay(ds);
+      }catch(e){ toast(e.error||'Something went wrong'); }
+    };
+  });
   sheet.querySelectorAll('[data-act]').forEach(b=>{
     const id=+b.dataset.id, act=b.dataset.act;
     b.onclick=async()=>{
       try{
         if(act==='edit'){ editingId=id; openDay(ds); return; }
-        if(act==='del'){ await api('/api/appointments/'+id,{method:'DELETE'}); toast('Deleted'); }
-        if(act==='ask'){
-          const msg=prompt(`Message to ${o.name} (optional):`,'');
-          if(msg===null) return;
-          await api('/api/requests',{method:'POST',body:{appointment_id:id,message:msg.trim()||null}});
-          toast(`Asked ${o.name} to cover`);
+        if(act==='del'){
+          if(!confirm('Delete this? It disappears for both of you.')) return;
+          await api('/api/appointments/'+id,{method:'DELETE'}); toast('Deleted');
         }
-        if(act==='cancelreq'){ await api('/api/requests/'+id+'/cancel',{method:'POST'}); toast('Request cancelled'); }
-        if(act==='accept'){ await api('/api/requests/'+id+'/respond',{method:'POST',body:{accept:true}}); toast("You've got it covered"); }
-        if(act==='decline'){ await api('/api/requests/'+id+'/respond',{method:'POST',body:{accept:false}}); toast('Declined'); }
+        if(act==='handoff'){
+          const msg=prompt(`Ask ${o.name} to take this. Note (optional):`,'');
+          if(msg===null) return;
+          await api('/api/appointments/'+id+'/handoff',{method:'POST',body:{message:msg.trim()||null}});
+          toast(`Sent to ${o.name} — waiting on her OK`);
+        }
+        if(act==='claim'){
+          await api('/api/appointments/'+id,{method:'PUT',body:{parent_id:D.me}});
+          toast("You've got it");
+        }
         await refresh(); renderApp(); openDay(ds);
       }catch(e){ toast(e.error||'Something went wrong'); }
     };
   });
+}
+
+// Accept / decline / withdraw a proposal.
+async function respondProposal(id, action){
+  if(action==='cancel'){ await api('/api/proposals/'+id+'/cancel',{method:'POST'}); toast('Withdrawn'); return; }
+  await api('/api/proposals/'+id+'/respond',{method:'POST',body:{accept:action==='accept'}});
+  toast(action==='accept'?'Accepted':'Declined');
 }
 
 function apptCard(a, ds){
@@ -302,75 +365,103 @@ function apptCard(a, ds){
   if(a.type==='birthday'){
     const age=bdayAge(a, ds||a.date);
     return `<div class="appt">
-      <div class="top"><b>🎂 ${esc(a.title)}</b>${age?`<span>turning ${age}</span>`:''}</div>
-      <div class="meta">${kid?esc(kid.name)+' · ':''}repeats every year${a.notes?' · '+esc(a.notes):''}</div>
+      <div class="top"><b>&#127874; ${esc(a.title)}</b>${age?`<span>turning ${age}</span>`:''}</div>
+      <div class="meta">${kid?esc(kid.name)+' &middot; ':''}repeats every year${a.notes?' &middot; '+esc(a.notes):''}</div>
       <div class="actions">${baseActions}</div>
     </div>`;
   }
 
   const owner=a.parent_id?parent(a.parent_id):null;
-  const pend=D.requests.find(r=>r.appointment_id===a.id&&r.status==='pending');
-  const mine=(a.covered_by||a.parent_id)===D.me;
-  let swap='';
-  if(a.covered_by) swap=`<div class="swap">⇄ Covered by ${esc(parent(a.covered_by).name)}</div>`;
-  else if(pend) swap=`<div class="swap pending">⇄ Waiting on ${esc(parent(pend.to_parent).name)} to respond</div>`;
-  let actions=baseActions;
-  if(pend && pend.to_parent===D.me)
-    actions=`<button class="btn small primary" data-act="accept" data-id="${pend.id}">I'll cover it</button>
-             <button class="btn small" data-act="decline" data-id="${pend.id}">Can't</button>`+actions;
-  else if(pend && pend.from_parent===D.me)
-    actions=`<button class="btn small" data-act="cancelreq" data-id="${pend.id}">Cancel request</button>`+actions;
-  else if(owner && mine && !a.covered_by)
-    actions=`<button class="btn small" data-act="ask" data-id="${a.id}">Ask ${esc(other().name)} to cover</button>`+actions;
-  return `<div class="appt">
+  const p=pendingFor(a.id);
+  const o=other();
+  const settled = a.confirmed && !p;
+
+  // Ownership line
+  let ownLine;
+  if(!owner) ownLine=`<span class="own" style="background:#9AA093">Nobody yet &mdash; unassigned</span>`;
+  else if(settled) ownLine=`<span class="own" style="background:${owner.color}">${esc(owner.name)} ${a.type==='event'?'is on it':'is taking them'}</span>`;
+  else ownLine=`<span class="own unsettled" style="border-color:${owner.color}; color:${owner.color}">&#9203; ${esc(owner.name)} &mdash; not agreed yet</span>`;
+
+  // Pending banner + action buttons
+  let banner='', actions=baseActions;
+  if(p){
+    const mineToAnswer = p.to_parent===D.me;
+    const from = parent(p.from_parent).name;
+    const label = p.kind==='edit' ? `${esc(from)} changed something you agreed to`
+                : p.kind==='assign' ? `${esc(from)} is asking you to take this`
+                : `${esc(from)} is asking you to take this over`;
+    banner=`<div class="pendbox tight">
+      <div class="pendhead">&#9203; ${mineToAnswer?label:`Waiting on ${esc(parent(p.to_parent).name)} to accept`}</div>
+      ${p.message?`<div class="pendmsg">"${esc(p.message)}"</div>`:''}
+      ${p.kind==='edit'?`<div class="pendbody">The old version stands until it's accepted.</div>`:''}
+    </div>`;
+    actions = mineToAnswer
+      ? `<button class="btn small primary" data-p="${p.id}" data-pa="accept">Accept</button>
+         <button class="btn small" data-p="${p.id}" data-pa="decline">Decline</button>` + baseActions
+      : `<button class="btn small" data-p="${p.id}" data-pa="cancel">Withdraw</button>` + baseActions;
+  } else if(!owner){
+    actions=`<button class="btn small primary" data-act="claim" data-id="${a.id}">I'll take it</button>
+             <button class="btn small" data-act="handoff" data-id="${a.id}">Ask ${esc(o.name)}</button>`+baseActions;
+  } else if(owner.id===D.me){
+    actions=`<button class="btn small" data-act="handoff" data-id="${a.id}">Ask ${esc(o.name)} to take it</button>`+baseActions;
+  }
+
+  return `<div class="appt ${p?'ispending':''}">
     <div class="top"><b>${esc(a.title)}</b>${a.time?`<span>${fmtTime(a.time)}</span>`:''}</div>
-    <div class="meta">${a.type==='event'?'Event · ':''}${kid?esc(kid.name)+' · ':''}${a.notes?esc(a.notes):''}</div>
-    ${owner?`<span class="own" style="background:${owner.color}">${esc(owner.name)} ${a.type==='event'?'is on it':'is taking them'}</span>`
-           :`<span class="own" style="background:var(--muted)">Both / everyone</span>`}
-    ${swap}<div class="actions">${actions}</div>
+    <div class="meta">${a.type==='event'?'Event &middot; ':''}${kid?esc(kid.name)+' &middot; ':''}${a.notes?esc(a.notes):''}</div>
+    ${ownLine}${banner}<div class="actions">${actions}</div>
   </div>`;
 }
 
 /* ---- inbox ---- */
 function openInbox(){
-  const mine=D.requests.filter(r=>r.status==='pending'&&r.to_parent===D.me);
-  const sent=D.requests.filter(r=>r.status==='pending'&&r.from_parent===D.me);
-  const done=D.requests.filter(r=>r.status!=='pending').slice(0,10);
+  const mine=(D.pending||[]).filter(p=>p.to_parent===D.me);
+  const sent=(D.pending||[]).filter(p=>p.from_parent===D.me);
+  const done=(D.history||[]).slice(0,10);
   const sheet=$('#inboxsheet');
-  const card=(r,kind)=>{
-    const kid=D.kids.find(k=>k.id===r.kid_id);
-    return `<div class="req">
-      <div class="head">${esc(r.title)}</div>
-      <div class="meta">${fmtDate(r.date)}${r.time?' · '+fmtTime(r.time):''}${kid?' · '+esc(kid.name):''}</div>
-      ${r.message?`<div class="msg">"${esc(r.message)}"</div>`:''}
-      ${kind==='in'?`<div class="actions">
-          <button class="btn small primary" data-r="${r.id}" data-a="accept">I'll cover it</button>
-          <button class="btn small" data-r="${r.id}" data-a="decline">Can't</button></div>`
-      :kind==='out'?`<div class="actions"><span class="meta">Waiting on ${esc(parent(r.to_parent).name)}</span>
-          <button class="btn small" data-r="${r.id}" data-a="cancel">Cancel</button></div>`
-      :`<div class="status" style="color:${r.status==='accepted'?'#2F6D62':'var(--muted)'}">${r.status}${r.status==='accepted'?' · '+esc(parent(r.to_parent).name)+' covered it':''}</div>`}
-    </div>`;
+
+  const title=p=>{
+    if(p.kind==='swap_day') return `Day swap &mdash; ${fmtDate(p.date)}`;
+    return esc(p.title||'Appointment');
   };
+  const detail=p=>{
+    if(p.kind==='swap_day')
+      return `Would become <b>${p.to_parent_on_date?esc(parent(p.to_parent_on_date).name)+"'s day":'the normal rotation'}</b>`;
+    const kid=D.kids.find(k=>k.id===p.kid_id);
+    const w=`${fmtDate(p.item_date)}${p.item_time?' &middot; '+fmtTime(p.item_time):''}${kid?' &middot; '+esc(kid.name):''}`;
+    if(p.kind==='edit') return `${w}<br><span class="tag">changed &mdash; needs re-approval</span>`;
+    if(p.kind==='reassign') return `${w}<br><span class="tag">handoff</span>`;
+    return w;
+  };
+  const card=(p,box)=>`
+    <div class="req ${box==='in'?'needsme':''}">
+      <div class="head">${title(p)}</div>
+      <div class="meta">${detail(p)}</div>
+      ${p.message?`<div class="msg">"${esc(p.message)}"</div>`:''}
+      ${box==='in'?`<div class="actions">
+          <button class="btn small primary" data-p="${p.id}" data-pa="accept">Accept</button>
+          <button class="btn small" data-p="${p.id}" data-pa="decline">Decline</button></div>`
+      :box==='out'?`<div class="actions"><span class="meta" style="margin:0">Waiting on ${esc(parent(p.to_parent).name)}</span>
+          <button class="btn small" data-p="${p.id}" data-pa="cancel">Withdraw</button></div>`
+      :`<div class="status" style="color:${p.status==='accepted'?'#2F6D62':'var(--muted)'}">${esc(p.status)}${p.status==='declined'&&p.kind!=='swap_day'?' &mdash; unassigned until someone claims it':''}</div>`}
+    </div>`;
+
   sheet.innerHTML=`
-  <header><h2 class="display">Coverage requests</h2><button class="x" aria-label="Close">✕</button></header>
+  <header><h2 class="display">Approvals</h2><button class="x" aria-label="Close">&#10005;</button></header>
   <div class="body">
     <div class="section-h">Needs your answer</div>
-    ${mine.length?mine.map(r=>card(r,'in')).join(''):'<div class="empty">Nothing waiting on you.</div>'}
-    <div class="section-h">You asked</div>
-    ${sent.length?sent.map(r=>card(r,'out')).join(''):'<div class="empty">No open requests.</div>'}
+    ${mine.length?mine.map(p=>card(p,'in')).join(''):'<div class="empty">Nothing waiting on you.</div>'}
+    <div class="section-h">Waiting on ${esc(other().name)}</div>
+    ${sent.length?sent.map(p=>card(p,'out')).join(''):'<div class="empty">Nothing outstanding.</div>'}
     <div class="section-h">Recent</div>
-    ${done.length?done.map(r=>card(r,'hist')).join(''):'<div class="empty">No history yet.</div>'}
+    ${done.length?done.map(p=>card(p,'hist')).join(''):'<div class="empty">No history yet.</div>'}
   </div>`;
   showSheet('#inboxsheet');
   sheet.querySelector('.x').onclick=closeSheets;
-  sheet.querySelectorAll('[data-r]').forEach(b=>{
+  sheet.querySelectorAll('[data-p]').forEach(b=>{
     b.onclick=async()=>{
-      const id=b.dataset.r, a=b.dataset.a;
-      try{
-        if(a==='cancel') await api('/api/requests/'+id+'/cancel',{method:'POST'});
-        else await api('/api/requests/'+id+'/respond',{method:'POST',body:{accept:a==='accept'}});
-        await refresh(); renderApp(); openInbox();
-        toast(a==='accept'?"You've got it covered":a==='decline'?'Declined':'Cancelled');
+      try{ await respondProposal(b.dataset.p, b.dataset.pa);
+           await refresh(); renderApp(); openInbox();
       }catch(e){ toast(e.error||'Something went wrong'); }
     };
   });
@@ -379,6 +470,7 @@ function openInbox(){
 /* ---- settings ---- */
 function openSettings(){
   const sheet=$('#setsheet');
+  const mine=parent(D.me);
   sheet.innerHTML=`
   <header><h2 class="display">Schedule & kids</h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
@@ -395,6 +487,14 @@ function openSettings(){
     <div id="kidlist">${D.kids.map(k=>`<div class="kidrow"><span>${esc(k.name)}</span>
       <button class="btn small danger" data-kid="${k.id}">Remove</button></div>`).join('')||'<div class="empty">No kids added yet.</div>'}</div>
     <div class="addkid"><input id="k-name" placeholder="Kid's name"><button class="btn" id="k-add">Add</button></div>
+
+    <div class="section-h">Email notifications</div>
+    ${D.mailReady?'':`<div class="warn">Email isn't switched on yet. Add SMTP_HOST, SMTP_USER and SMTP_PASS in your Railway variables and redeploy — the settings below will start working right away.</div>`}
+    <div class="field"><label>Your email</label><input id="n-email" type="email" placeholder="name@email.com" value="${esc(mine.email||'')}"></div>
+    <label class="check"><input type="checkbox" id="n-on" ${mine.notify?'checked':''}> Email me when ${esc(other().name)} needs my OK or answers one of my requests</label>
+    <button class="btn primary" id="n-save" style="width:100%; margin-top:10px">Save notification settings</button>
+    <div class="err" id="n-err"></div>
+    <p class="empty">You'll get an email when ${esc(other().name)} asks you to take an appointment, proposes a day swap, changes something you already agreed to, or answers one of your requests — plus a heads-up when she adds something that doesn't need your approval. ${other().email?`${esc(other().name)} has an email set${other().notify?' and notifications on':' but notifications off'}.`:`${esc(other().name)} hasn't added an email yet, so they won't get any.`}</p>
   </div>`;
   showSheet('#setsheet');
   sheet.querySelector('.x').onclick=closeSheets;
@@ -425,6 +525,12 @@ function openSettings(){
       await refresh(); renderApp(); openSettings();
     };
   });
+  $('#n-save').onclick=async()=>{
+    try{
+      await api('/api/me',{method:'POST',body:{email:$('#n-email').value.trim(), notify:$('#n-on').checked}});
+      await refresh(); renderApp(); openSettings(); toast('Notification settings saved');
+    }catch(e){ $('#n-err').textContent=e.error||'Could not save'; }
+  };
 }
 
 boot().catch(e=>{ $('#app').innerHTML='<div class="gate"><div class="gate-card">Could not reach the server. Refresh to try again.</div></div>'; });
