@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Our Calendar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#F6F7F4; --card:#FFFFFF; --ink:#21281F; --muted:#6B7265;
+  --line:#E1E4DC; --danger:#A33B2E;
+  --p1:#2F6D62; --p2:#C0702A; /* replaced at runtime by parent colors */
+  --radius:10px;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+html,body{height:100%}
+body{
+  font-family:'Public Sans',system-ui,sans-serif; background:var(--paper); color:var(--ink);
+  font-size:15px; line-height:1.45;
+}
+button{font:inherit; cursor:pointer}
+input,select,textarea{font:inherit; color:var(--ink)}
+.display{font-family:'Bricolage Grotesque',sans-serif}
+
+/* ---------- shared bits ---------- */
+.btn{
+  border:1px solid var(--line); background:var(--card); color:var(--ink);
+  padding:7px 14px; border-radius:8px; font-weight:600; font-size:14px;
+}
+.btn:hover{border-color:var(--ink)}
+.btn:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible{
+  outline:2px solid var(--ink); outline-offset:1px;
+}
+.btn.primary{background:var(--ink); color:var(--paper); border-color:var(--ink)}
+.btn.primary:hover{opacity:.88}
+.btn.danger{color:var(--danger); border-color:var(--danger)}
+.btn.small{padding:4px 10px; font-size:13px}
+.field{display:flex; flex-direction:column; gap:4px; margin-bottom:12px}
+.field label{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted)}
+.field input,.field select,.field textarea{
+  border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:#fff;
+}
+.err{color:var(--danger); font-size:13px; min-height:18px; margin-top:6px}
+
+/* ---------- auth screens ---------- */
+.gate{min-height:100%; display:flex; align-items:center; justify-content:center; padding:24px}
+.gate-card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px; width:100%; max-width:520px}
+.gate h1{font-size:30px; margin-bottom:4px}
+.gate .sub{color:var(--muted); margin-bottom:22px}
+.parent-setup{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+@media(max-width:540px){.parent-setup{grid-template-columns:1fr}}
+.parent-box{border:1px solid var(--line); border-radius:10px; padding:14px}
+.parent-box h3{font-size:14px; margin-bottom:10px; display:flex; align-items:center; gap:8px}
+.swatches{display:flex; gap:8px; flex-wrap:wrap}
+.swatch{width:26px; height:26px; border-radius:50%; border:2px solid transparent; padding:0}
+.swatch.sel{border-color:var(--ink)}
+.login-choice{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px}
+.login-parent{
+  border:1px solid var(--line); border-radius:10px; background:#fff; padding:18px 10px;
+  display:flex; flex-direction:column; align-items:center; gap:8px; font-weight:700;
+}
+.login-parent .dot{width:34px; height:34px; border-radius:50%}
+.login-parent.sel{border-width:2px}
+
+/* ---------- app shell ---------- */
+header.app{
+  display:flex; align-items:center; gap:10px; padding:12px 18px;
+  border-bottom:1px solid var(--line); background:var(--card);
+  position:sticky; top:0; z-index:20; flex-wrap:wrap;
+}
+.brand{font-weight:700; font-size:17px; margin-right:auto; display:flex; align-items:center; gap:10px}
+.brand .who{font-size:12px; font-weight:600; color:var(--muted)}
+.monthnav{display:flex; align-items:center; gap:8px}
+.monthnav .month{font-size:20px; font-weight:700; min-width:190px; text-align:center}
+.iconbtn{position:relative; border:1px solid var(--line); background:#fff; border-radius:8px; padding:6px 10px; font-size:15px}
+.badge{
+  position:absolute; top:-6px; right:-6px; background:var(--danger); color:#fff;
+  font-size:11px; font-weight:700; border-radius:999px; min-width:18px; height:18px;
+  display:flex; align-items:center; justify-content:center; padding:0 4px;
+}
+.legend{display:flex; gap:14px; padding:10px 18px 0; font-size:13px; color:var(--muted); flex-wrap:wrap}
+.legend span{display:flex; align-items:center; gap:6px}
+.legend i{width:12px; height:12px; border-radius:3px; display:inline-block}
+
+/* ---------- calendar ---------- */
+.cal-wrap{padding:12px 18px 32px; max-width:1100px; margin:0 auto}
+.dow{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; margin-bottom:6px}
+.dow div{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); text-align:center}
+.grid{display:grid; grid-template-columns:repeat(7,1fr); gap:6px}
+.day{
+  background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+  min-height:104px; padding:6px; text-align:left; display:flex; flex-direction:column; gap:4px;
+  position:relative; transition:border-color .12s;
+}
+.day:hover{border-color:var(--ink)}
+.day.blank{background:transparent; border-color:transparent; pointer-events:none}
+.day .num{font-weight:700; font-size:14px; font-variant-numeric:tabular-nums}
+.day.today .num{background:var(--ink); color:var(--paper); border-radius:6px; padding:0 6px; align-self:flex-start}
+.day .who{
+  position:absolute; top:6px; right:6px; font-size:11px; font-weight:700; color:#fff;
+  border-radius:6px; padding:1px 6px;
+}
+.day .who.override{outline:2px dashed rgba(0,0,0,.35); outline-offset:1px}
+.chip{
+  font-size:11.5px; font-weight:600; border-radius:6px; padding:2px 6px; color:#fff;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:flex; gap:4px; align-items:center;
+}
+.chip .t{opacity:.85; font-weight:500}
+.chip.pending{outline:2px dashed rgba(0,0,0,.4); outline-offset:-2px}
+.more{font-size:11px; color:var(--muted); font-weight:600}
+
+/* ---------- panels ---------- */
+.overlay{position:fixed; inset:0; background:rgba(30,35,28,.45); z-index:40; display:none}
+.overlay.open{display:block}
+.sheet{
+  position:fixed; top:0; right:0; bottom:0; width:min(440px,100%); background:var(--card);
+  border-left:1px solid var(--line); z-index:50; transform:translateX(102%); transition:transform .2s ease;
+  display:flex; flex-direction:column;
+}
+.sheet.open{transform:none}
+.sheet header{
+  padding:16px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px;
+}
+.sheet header h2{font-size:18px; margin-right:auto}
+.sheet .body{padding:16px 18px; overflow-y:auto; flex:1}
+.x{border:none; background:none; font-size:20px; line-height:1; padding:4px 8px}
+
+.custody-row{display:flex; align-items:center; gap:10px; margin-bottom:18px; flex-wrap:wrap}
+.custody-tag{font-weight:700; color:#fff; border-radius:8px; padding:4px 10px; font-size:13px}
+
+.appt{border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px}
+.appt .top{display:flex; align-items:baseline; gap:8px}
+.appt .top b{margin-right:auto}
+.appt .meta{font-size:13px; color:var(--muted); margin:2px 0 8px}
+.appt .own{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600;
+  border-radius:6px; padding:2px 8px; color:#fff; margin-bottom:8px}
+.appt .actions{display:flex; gap:8px; flex-wrap:wrap}
+.swap{font-size:12.5px; font-weight:600; color:var(--muted); margin-bottom:8px}
+.swap.pending{color:var(--ink)}
+
+.req{border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px}
+.req .head{font-weight:600; margin-bottom:2px}
+.req .meta{font-size:13px; color:var(--muted); margin-bottom:8px}
+.req .msg{font-size:14px; background:var(--paper); border-radius:8px; padding:8px 10px; margin-bottom:8px}
+.req .actions{display:flex; gap:8px}
+.req .status{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em}
+.section-h{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin:18px 0 8px}
+.empty{color:var(--muted); font-size:14px; padding:8px 0}
+
+.patt{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; margin-bottom:16px}
+.patt .cell{display:flex; flex-direction:column; gap:4px; font-size:11px; font-weight:700; text-align:center; color:var(--muted)}
+.patt select{border:1px solid var(--line); border-radius:6px; padding:4px 2px; font-size:12px; width:100%}
+.kidrow{display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line)}
+.kidrow span{margin-right:auto}
+.addkid{display:flex; gap:8px; margin-top:10px}
+.addkid input{flex:1; border:1px solid var(--line); border-radius:8px; padding:7px 10px}
+
+.toast{
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--paper);
+  padding:9px 16px; border-radius:8px; font-size:14px; z-index:80; opacity:0; transition:opacity .2s; pointer-events:none;
+}
+.toast.show{opacity:1}
+
+@media(max-width:680px){
+  .day{min-height:74px; padding:4px}
+  .day .who{position:static; align-self:flex-end; order:-1}
+  .chip .t{display:none}
+  .monthnav .month{min-width:0; font-size:16px}
+  .cal-wrap{padding:10px 8px 28px}
+  .legend{padding:8px 10px 0}
+}
+@media(prefers-reduced-motion:reduce){ .sheet{transition:none} }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="toast" id="toast"></div>
+<script>
+/* ============ tiny state + api ============ */
+const $ = s => document.querySelector(s);
+let token = localStorage.getItem('cc_token') || null;
+let me = JSON.parse(localStorage.getItem('cc_me') || 'null');
+let view = new Date(); view.setDate(1);
+let D = null;           // last /api/data payload
+let openDate = null;    // date string for open day sheet
+let editingId = null;   // appointment being edited
+let pollTimer = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: { 'Content-Type': 'application/json', ...(token ? { 'x-token': token } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && token) { signOutLocal(); return Promise.reject(data); }
+  if (!res.ok) return Promise.reject(data);
+  return data;
+}
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function signOutLocal(){ token=null; me=null; localStorage.removeItem('cc_token'); localStorage.removeItem('cc_me'); boot(); }
+
+const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DOWS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const pad=n=>String(n).padStart(2,'0');
+const monthKey=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}`;
+const todayStr=()=>{const t=new Date();return `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;};
+function fmtDate(ds){ const [y,m,d]=ds.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}); }
+function fmtTime(t){ if(!t) return ''; let [h,m]=t.split(':').map(Number); const ap=h>=12?'PM':'AM'; h=h%12||12; return `${h}:${pad(m)} ${ap}`; }
+
+function parent(id){ return D?.parents.find(p=>p.id===id) || {name:'?',color:'#888'}; }
+function other(){ return D.parents.find(p=>p.id!==D.me); }
+function custodyFor(ds){
+  const ov = D.overrides.find(o=>o.date===ds);
+  if (ov) return { pid: ov.parent_id, override:true };
+  const wd = new Date(ds+'T12:00:00').getDay();
+  const pr = D.pattern.find(p=>p.weekday===wd);
+  return { pid: pr?.parent_id || null, override:false };
+}
+function tint(hex, a){
+  const n=parseInt(hex.slice(1),16), r=n>>16, g=(n>>8)&255, b=n&255;
+  return `rgba(${r},${g},${b},${a})`;
+}
+</script>
+<script src="/app.js"></script>
+</body>
+</html>
