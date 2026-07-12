@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
 <title>Our Calendar</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#21281F">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Our Calendar">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -195,10 +203,103 @@ header.app{
   .legend{padding:8px 10px 0}
 }
 @media(prefers-reduced-motion:reduce){ .sheet{transition:none} }
+
+/* ---------- installed-app (PWA) behaviour ---------- */
+/* Respect the notch / status bar / gesture bar when running standalone. */
+header.app{
+  padding-top:calc(12px + env(safe-area-inset-top));
+  padding-left:calc(18px + env(safe-area-inset-left));
+  padding-right:calc(18px + env(safe-area-inset-right));
+}
+.sheet{padding-bottom:env(safe-area-inset-bottom)}
+.gate{padding-top:calc(24px + env(safe-area-inset-top))}
+
+@media(max-width:680px){
+  /* Bigger tap targets — thumbs, not cursors. */
+  .btn{padding:9px 15px}
+  .btn.small{padding:7px 12px; font-size:13.5px}
+  .iconbtn{padding:9px 12px; font-size:17px}
+  .field input,.field select,.field textarea{padding:11px 12px; font-size:16px} /* 16px stops iOS zoom-on-focus */
+  .day{min-height:82px}
+
+  /* Sheets slide up from the bottom like a native panel, not in from the side. */
+  .sheet{
+    top:auto; left:0; right:0; bottom:0; width:100%;
+    max-height:88vh; border-left:none; border-top:1px solid var(--line);
+    border-radius:16px 16px 0 0; transform:translateY(102%);
+  }
+  .sheet.open{transform:none}
+  .sheet header{
+    position:relative; padding-top:20px;
+    border-radius:16px 16px 0 0;
+  }
+  /* grab handle */
+  .sheet header::before{
+    content:''; position:absolute; top:7px; left:50%; transform:translateX(-50%);
+    width:36px; height:4px; border-radius:2px; background:var(--line);
+  }
+  .sheet .body{padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+  .x{font-size:24px; padding:6px 10px}
+
+  /* Header wraps to two rows on a narrow screen */
+  .brand{width:100%; margin-bottom:6px}
+  .monthnav{margin-right:auto}
+}
+
+/* Kill the tap-highlight flash and text selection on controls */
+button, .day{ -webkit-tap-highlight-color:transparent; user-select:none }
+
+/* Install prompt */
+.install{
+  position:fixed; left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom));
+  background:var(--ink); color:var(--paper); border-radius:12px; padding:12px 14px;
+  display:none; align-items:center; gap:12px; z-index:70; box-shadow:0 6px 20px rgba(0,0,0,.2);
+}
+.install.show{display:flex}
+.install .txt{margin-right:auto; font-size:14px; line-height:1.3}
+.install .txt b{display:block; font-size:15px}
+.install button{border:none; border-radius:8px; padding:8px 14px; font-weight:700; font-size:14px}
+.install .go{background:var(--paper); color:var(--ink)}
+.install .no{background:transparent; color:var(--paper); opacity:.7; padding:8px}
+
+/* Modal */
+.modal-wrap{
+  position:fixed; inset:0; background:rgba(30,35,28,.5); z-index:100;
+  display:flex; align-items:center; justify-content:center; padding:20px;
+  opacity:0; transition:opacity .15s;
+}
+.modal-wrap.open{opacity:1}
+.modal{
+  background:var(--card); border-radius:14px; padding:20px; width:100%; max-width:400px;
+  transform:translateY(8px); transition:transform .15s;
+}
+.modal-wrap.open .modal{transform:none}
+.modal h3{font-size:17px; margin-bottom:6px; font-family:'Bricolage Grotesque',sans-serif}
+.modal p{font-size:14px; color:var(--muted); margin-bottom:12px}
+.modal-in{
+  width:100%; border:1px solid var(--line); border-radius:8px; padding:11px 12px;
+  font-size:16px; margin-bottom:14px;
+}
+.modal-btns{display:flex; gap:8px; justify-content:flex-end}
+.modal-btns .btn{padding:9px 16px}
+
+/* Offline banner */
+.offline{
+  position:fixed; top:0; left:0; right:0; background:#A33B2E; color:#fff; text-align:center;
+  font-size:13px; font-weight:600; padding:calc(6px + env(safe-area-inset-top)) 6px 6px;
+  z-index:90; display:none;
+}
+.offline.show{display:block}
 </style>
 </head>
 <body>
+<div class="offline" id="offline">You're offline — showing the last view. Changes won't save until you reconnect.</div>
 <div id="app"></div>
+<div class="install" id="install">
+  <div class="txt"><b>Add to your home screen</b>Opens like an app, no browser bar.</div>
+  <button class="no" id="install-no">Not now</button>
+  <button class="go" id="install-go">Install</button>
+</div>
 <div class="toast" id="toast"></div>
 <script>
 /* ============ tiny state + api ============ */
@@ -212,11 +313,18 @@ let editingId = null;   // appointment being edited
 let pollTimer = null;
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    method: opts.method || 'GET',
-    headers: { 'Content-Type': 'application/json', ...(token ? { 'x-token': token } : {}) },
-    body: opts.body ? JSON.stringify(opts.body) : undefined
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opts.method || 'GET',
+      headers: { 'Content-Type': 'application/json', ...(token ? { 'x-token': token } : {}) },
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    });
+  } catch (e) {
+    // No network — the request never left the phone, so nothing was saved.
+    setOnline();
+    return Promise.reject({ error: "You're offline — that didn't save. Try again once you're back on.", offline: true });
+  }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && token) { signOutLocal(); return Promise.reject(data); }
   if (!res.ok) return Promise.reject(data);
@@ -234,8 +342,106 @@ const todayStr=()=>{const t=new Date();return `${t.getFullYear()}-${pad(t.getMon
 function fmtDate(ds){ const [y,m,d]=ds.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}); }
 function fmtTime(t){ if(!t) return ''; let [h,m]=t.split(':').map(Number); const ap=h>=12?'PM':'AM'; h=h%12||12; return `${h}:${pad(m)} ${ap}`; }
 
+/* ============ modal (replaces prompt/confirm, which are unreliable in PWAs) ============ */
+function ask({ title, body, placeholder, ok = 'Send', cancel = 'Cancel', input = true, danger = false }) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-wrap';
+    wrap.innerHTML = `
+      <div class="modal">
+        <h3>${esc(title)}</h3>
+        ${body ? `<p>${esc(body)}</p>` : ''}
+        ${input ? `<input class="modal-in" placeholder="${esc(placeholder || '')}">` : ''}
+        <div class="modal-btns">
+          <button class="btn" data-x="0">${esc(cancel)}</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" data-x="1">${esc(ok)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const field = wrap.querySelector('.modal-in');
+    requestAnimationFrame(() => { wrap.classList.add('open'); field && field.focus(); });
+
+    const done = val => { wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 150); resolve(val); };
+    wrap.querySelectorAll('[data-x]').forEach(b => {
+      b.onclick = () => done(b.dataset.x === '1' ? (input ? (field.value.trim() || '') : true) : null);
+    });
+    wrap.onclick = e => { if (e.target === wrap) done(null); };
+    field && field.addEventListener('keydown', e => { if (e.key === 'Enter') done(field.value.trim() || ''); });
+  });
+}
+
 function parent(id){ return D?.parents.find(p=>p.id===id) || {name:'?',color:'#888'}; }
 function other(){ return D.parents.find(p=>p.id!==D.me); }
+
+/* ============ PWA: install, offline, resume ============ */
+const isStandalone = () =>
+  window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+
+// Register the service worker. This is what makes Android offer "Install app".
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').then(reg => {
+      // If a new version is deployed, activate it as soon as it's ready.
+      reg.addEventListener('updatefound', () => {
+        const nw = reg.installing;
+        nw && nw.addEventListener('statechange', () => {
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) nw.postMessage('skipWaiting');
+        });
+      });
+    }).catch(()=>{});
+    // A new SW taking over means new code — reload once so both phones stay in sync.
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded) return; reloaded = true; window.location.reload();
+    });
+  });
+}
+
+// Chrome fires this instead of showing its own banner; we show our own prompt.
+let installEvent = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  installEvent = e;
+  if (!isStandalone() && !localStorage.getItem('cc_no_install')) {
+    setTimeout(() => document.getElementById('install')?.classList.add('show'), 2500);
+  }
+});
+window.addEventListener('DOMContentLoaded', () => {
+  const box = document.getElementById('install');
+  document.getElementById('install-go')?.addEventListener('click', async () => {
+    box.classList.remove('show');
+    if (!installEvent) return;
+    installEvent.prompt();
+    await installEvent.userChoice;
+    installEvent = null;
+  });
+  document.getElementById('install-no')?.addEventListener('click', () => {
+    box.classList.remove('show');
+    localStorage.setItem('cc_no_install', '1');
+  });
+});
+window.addEventListener('appinstalled', () => {
+  document.getElementById('install')?.classList.remove('show');
+});
+
+// Offline banner.
+const setOnline = () => {
+  document.getElementById('offline')?.classList.toggle('show', !navigator.onLine);
+};
+window.addEventListener('online',  () => { setOnline(); softRefresh(); });
+window.addEventListener('offline', setOnline);
+
+// Coming back to the app (unlocking the phone, switching back) must show fresh
+// data straight away — not up to 25 seconds later.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') softRefresh();
+});
+
+async function softRefresh(){
+  if (!token || !D || !navigator.onLine) return;
+  try { await refresh(); renderApp(true); } catch(e) {}
+}
+
 function custodyFor(ds){
   const ov = D.overrides.find(o=>o.date===ds);
   const pendingSwap = (D.pending||[]).find(p=>p.kind==='swap_day'&&p.date===ds);

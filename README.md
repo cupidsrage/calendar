@@ -85,3 +85,22 @@ SMTP_HOST=smtp.gmail.com SMTP_USER=you@gmail.com SMTP_PASS=xxxx npm start
 - Sessions persist until sign-out; token stored in each browser's localStorage.
 - Email is fire-and-forget: if the mail server hiccups, the calendar action still succeeds and the failure is logged.
 - To start over, delete `calendar.db` on the volume and redeploy.
+
+## Install on Android (and iPhone)
+
+The app is a PWA — it installs to the home screen straight from the browser. No Play Store, no APK, no $25 fee.
+
+**Android (Chrome):**
+1. Open your Railway URL in Chrome.
+2. Wait a couple of seconds — a black "Add to your home screen" bar slides up. Tap **Install**.
+3. If you dismissed it, use the ⋮ menu → **Install app** (or **Add to Home screen**).
+
+**iPhone (Safari):** Share button → **Add to Home Screen**. (iOS only allows this from Safari, not Chrome.)
+
+Once installed it opens fullscreen with its own icon and no browser bar. It refreshes the moment you open it or unlock your phone, so you never see stale data.
+
+**Redeploys reach both phones automatically.** The service worker is served with no-cache and self-updates, so pushing to Railway updates the installed app on next open — no reinstall needed.
+
+**Offline:** the app shell is cached, so it opens without a connection and shows a red "You're offline" bar. Calendar data is never cached (a stale custody day is worse than none), and any change you try to make while offline tells you it didn't save rather than pretending it did.
+
+**Notifications** are email-only (see Email setup above). Android web push is unreliable when the browser is closed, so email is the dependable channel for "she needs to approve this."

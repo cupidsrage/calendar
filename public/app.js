@@ -1,12 +1,17 @@
 /* ============ boot / routing ============ */
 async function boot(){
   clearInterval(pollTimer);
+  setOnline();
   const state = await api('/api/state');
   if (state.needsSetup) return renderSetup();
   if (!token || !me) return renderLogin(state.parents);
   await refresh();
   renderApp();
-  pollTimer = setInterval(async ()=>{ try{ await refresh(); renderApp(true); }catch(e){} }, 25000);
+  // Poll while the app is actually on screen; pause in the background to save battery.
+  pollTimer = setInterval(async ()=>{
+    if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+    try{ await refresh(); renderApp(true); }catch(e){}
+  }, 25000);
 }
 
 async function refresh(){ D = await api('/api/data?month='+monthKey(view)); }
@@ -283,7 +288,9 @@ function openDay(ds){
   }
 
   if($('#d-swap')) $('#d-swap').onclick=async()=>{
-    const msg=prompt(`Ask ${o.name} to swap this day to ${parent(swapTarget).name}. Note (optional):`,'');
+    const msg=await ask({ title:`Ask ${o.name} to swap this day?`,
+      body:`It would become ${parent(swapTarget).name}'s day. Nothing changes until she accepts.`,
+      placeholder:'Add a note (optional)', ok:'Send request' });
     if(msg===null) return;
     try{
       await api('/api/swap',{method:'POST',body:{date:ds,parent_id:swapTarget,message:msg.trim()||null}});
@@ -291,7 +298,9 @@ function openDay(ds){
     }catch(e){ toast(e.error||'Could not send'); }
   };
   if($('#d-reset')) $('#d-reset').onclick=async()=>{
-    const msg=prompt(`Ask ${o.name} to put this day back on the normal rotation. Note (optional):`,'');
+    const msg=await ask({ title:'Ask to undo this swap?',
+      body:`The day would go back to the normal rotation. ${o.name} has to accept.`,
+      placeholder:'Add a note (optional)', ok:'Send request' });
     if(msg===null) return;
     try{
       await api('/api/swap',{method:'POST',body:{date:ds,parent_id:null,message:msg.trim()||null}});
@@ -331,11 +340,15 @@ function openDay(ds){
       try{
         if(act==='edit'){ editingId=id; openDay(ds); return; }
         if(act==='del'){
-          if(!confirm('Delete this? It disappears for both of you.')) return;
+          const yes=await ask({ title:'Delete this?', body:'It disappears for both of you.',
+            input:false, ok:'Delete', danger:true });
+          if(!yes) return;
           await api('/api/appointments/'+id,{method:'DELETE'}); toast('Deleted');
         }
         if(act==='handoff'){
-          const msg=prompt(`Ask ${o.name} to take this. Note (optional):`,'');
+          const msg=await ask({ title:`Ask ${o.name} to take this?`,
+            body:"It's not hers until she accepts.",
+            placeholder:'Add a note (optional)', ok:'Send request' });
           if(msg===null) return;
           await api('/api/appointments/'+id+'/handoff',{method:'POST',body:{message:msg.trim()||null}});
           toast(`Sent to ${o.name} — waiting on her OK`);
@@ -520,7 +533,9 @@ function openSettings(){
   };
   sheet.querySelectorAll('[data-kid]').forEach(b=>{
     b.onclick=async()=>{
-      if(!confirm('Remove this kid? Their appointments stay, just untagged.')) return;
+      const yes=await ask({ title:'Remove this kid?', body:'Their appointments stay, just untagged.',
+        input:false, ok:'Remove', danger:true });
+      if(!yes) return;
       await api('/api/kids/'+b.dataset.kid,{method:'DELETE'});
       await refresh(); renderApp(); openSettings();
     };

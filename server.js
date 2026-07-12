@@ -137,6 +137,24 @@ const kidName = id => id ? (db.prepare('SELECT name FROM kids WHERE id = ?').get
 
 const app = express();
 app.use(express.json());
+
+// The service worker must NEVER be cached by the browser — if it is, a redeploy
+// can leave a phone stuck on old code forever.
+app.get('/sw.js', (req, res) => {
+  res.set({
+    'Content-Type': 'application/javascript',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Service-Worker-Allowed': '/'
+  });
+  res.sendFile(path.join(__dirname, 'public', 'sw.js'));
+});
+
+// API responses are live data — never let a proxy or browser cache them.
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- setup & login ----------
