@@ -4,7 +4,7 @@ async function boot(){
   setOnline();
   const state = await api('/api/state');
   if (state.needsSetup) return renderSetup();
-  if (!token || !me) return renderLogin(state.parents);
+  if (!token || !me) return renderLogin(state.parents, state.kidLogins || []);
   await refresh();
   renderApp();
   // Poll while the app is actually on screen; pause in the background to save battery.
@@ -63,58 +63,85 @@ function renderSetup(){
 }
 
 /* ============ login ============ */
-function renderLogin(parents){
+function renderLogin(parents, kidLogins){
+  kidLogins = kidLogins || [];
+  let mode = 'parent';                 // 'parent' | 'kid'
   let sel = parents[0]?.id;
-  $('#app').innerHTML = `
-  <div class="gate"><div class="gate-card" style="max-width:420px">
-    <h1 class="display">Our Calendar</h1>
-    <p class="sub">Who's signing in?</p>
-    <div class="login-choice">
-      ${parents.map(p=>`
-      <button class="login-parent ${p.id===sel?'sel':''}" data-id="${p.id}" style="border-color:${p.id===sel?p.color:''}">
-        <span class="dot" style="background:${p.color}"></span>${esc(p.name)}
-      </button>`).join('')}
-    </div>
-    <div class="field"><label>PIN</label><input id="l-pin" type="password" inputmode="numeric" placeholder="••••"></div>
-    <button class="btn primary" id="l-go" style="width:100%">Sign in</button>
-    <div class="err" id="l-err"></div>
-  </div></div>`;
-  document.querySelectorAll('.login-parent').forEach(b=>{
-    b.onclick=()=>{ sel=+b.dataset.id;
-      document.querySelectorAll('.login-parent').forEach(x=>{x.classList.remove('sel'); x.style.borderColor='';});
-      b.classList.add('sel'); b.style.borderColor=parents.find(p=>p.id===sel).color;
+  let kidSel = kidLogins[0]?.id;
+
+  const draw = ()=>{
+    const people = mode==='parent' ? parents : kidLogins;
+    const cur = mode==='parent' ? sel : kidSel;
+    $('#app').innerHTML = `
+    <div class="gate"><div class="gate-card" style="max-width:420px">
+      <h1 class="display">Our Calendar</h1>
+      <p class="sub">Who's signing in?</p>
+      <div class="login-choice">
+        ${people.map(p=>`
+        <button class="login-parent ${p.id===cur?'sel':''}" data-id="${p.id}" style="border-color:${p.id===cur&&p.color?p.color:''}">
+          <span class="dot" style="background:${p.color||'#8a8f84'}"></span>${esc(p.name)}
+        </button>`).join('') || `<p class="sub" style="margin:4px 0 0">No kid logins set up yet. A parent can add them in settings.</p>`}
+      </div>
+      <div class="field"><label>PIN</label><input id="l-pin" type="password" inputmode="numeric" placeholder="••••"></div>
+      <button class="btn primary" id="l-go" style="width:100%">Sign in</button>
+      <div class="err" id="l-err"></div>
+      ${kidLogins.length ? `<button class="linkbtn" id="l-switch" style="margin-top:14px;width:100%">
+        ${mode==='parent' ? "I'm a kid — view only" : "I'm a parent"}
+      </button>` : ''}
+    </div></div>`;
+
+    document.querySelectorAll('.login-parent').forEach(b=>{
+      b.onclick=()=>{
+        const id=+b.dataset.id;
+        if(mode==='parent'){ sel=id; } else { kidSel=id; }
+        document.querySelectorAll('.login-parent').forEach(x=>{x.classList.remove('sel'); x.style.borderColor='';});
+        b.classList.add('sel');
+        const c = (mode==='parent'?parents:kidLogins).find(p=>p.id===id)?.color;
+        if(c) b.style.borderColor=c;
+      };
+    });
+
+    const go = async ()=>{
+      try{
+        if(mode==='parent'){
+          const r = await api('/api/login',{method:'POST',body:{parent_id:sel,pin:$('#l-pin').value}});
+          token=r.token; me=r.parent;
+        } else {
+          const r = await api('/api/kid-login',{method:'POST',body:{kid_id:kidSel,pin:$('#l-pin').value}});
+          token=r.token; me={ id:r.kid.id, name:r.kid.name, kid:true };
+        }
+        localStorage.setItem('cc_token',token); localStorage.setItem('cc_me',JSON.stringify(me));
+        boot();
+      }catch(e){ $('#l-err').textContent=e.error||'Sign in failed'; }
     };
-  });
-  const go = async ()=>{
-    try{
-      const r = await api('/api/login',{method:'POST',body:{parent_id:sel,pin:$('#l-pin').value}});
-      token=r.token; me=r.parent;
-      localStorage.setItem('cc_token',token); localStorage.setItem('cc_me',JSON.stringify(me));
-      boot();
-    }catch(e){ $('#l-err').textContent=e.error||'Sign in failed'; }
+    $('#l-go').onclick=go;
+    $('#l-pin').addEventListener('keydown',e=>{ if(e.key==='Enter') go(); });
+    const sw=$('#l-switch');
+    if(sw) sw.onclick=()=>{ mode = mode==='parent'?'kid':'parent'; draw(); };
   };
-  $('#l-go').onclick=go;
-  $('#l-pin').addEventListener('keydown',e=>{ if(e.key==='Enter') go(); });
+  draw();
 }
 
 /* ============ main app ============ */
 function renderApp(preserve){
+  const isKid = D.role === 'kid';
   const wasOpen = preserve && document.querySelector('.sheet.open')?.id;
   document.documentElement.style.setProperty('--p1', D.parents[0]?.color || '#2F6D62');
   document.documentElement.style.setProperty('--p2', D.parents[1]?.color || '#C0702A');
-  const inboxCount = myInbox().length;
+  const inboxCount = isKid ? 0 : myInbox().length;
+  const whoName = isKid ? (me?.name || 'Kid') : parent(D.me).name;
 
   $('#app').innerHTML = `
   <header class="app">
-    <div class="brand display">Our Calendar <span class="who">signed in as ${esc(parent(D.me).name)}</span></div>
+    <div class="brand display">Our Calendar <span class="who">signed in as ${esc(whoName)}${isKid?' · view only':''}</span></div>
     <div class="monthnav">
       <button class="iconbtn" id="prev" aria-label="Previous month">‹</button>
       <div class="month display">${MONTHS[view.getMonth()]} ${view.getFullYear()}</div>
       <button class="iconbtn" id="next" aria-label="Next month">›</button>
       <button class="btn small" id="today">Today</button>
     </div>
-    <button class="iconbtn" id="inbox" aria-label="Approvals">⏳${inboxCount?`<span class="badge">${inboxCount}</span>`:''}</button>
-    <button class="iconbtn" id="settings" aria-label="Settings">⚙</button>
+    ${isKid?'':`<button class="iconbtn" id="inbox" aria-label="Approvals">⏳${inboxCount?`<span class="badge">${inboxCount}</span>`:''}</button>`}
+    ${isKid?'':`<button class="iconbtn" id="settings" aria-label="Settings">⚙</button>`}
     <button class="btn small" id="signout">Sign out</button>
   </header>
   <div class="legend">
@@ -137,8 +164,8 @@ function renderApp(preserve){
   $('#prev').onclick=()=>{ view.setMonth(view.getMonth()-1); refresh().then(()=>renderApp()); };
   $('#next').onclick=()=>{ view.setMonth(view.getMonth()+1); refresh().then(()=>renderApp()); };
   $('#today').onclick=()=>{ view=new Date(); view.setDate(1); refresh().then(()=>renderApp()); };
-  $('#inbox').onclick=()=>openInbox();
-  $('#settings').onclick=()=>openSettings();
+  if($('#inbox')) $('#inbox').onclick=()=>openInbox();
+  if($('#settings')) $('#settings').onclick=()=>openSettings();
   $('#signout').onclick=async()=>{ try{await api('/api/logout',{method:'POST'});}catch(e){} signOutLocal(); };
   $('#overlay').onclick=closeSheets;
 
@@ -187,11 +214,30 @@ function showSheet(id){ closeSheets(); $('#overlay').classList.add('open'); $(id
 /* ---- day sheet ---- */
 function openDay(ds){
   openDate=ds;
-  const c=custodyFor(ds), cp=c.pid?parent(c.pid):null, o=other();
+  const c=custodyFor(ds), cp=c.pid?parent(c.pid):null;
   const appts=itemsOn(ds);
+  const sheet=$('#daysheet');
+
+  // Kids get a read-only day: whose day it is + what's scheduled. No swap, no add, no edit.
+  if(D.role==='kid'){
+    sheet.innerHTML=`
+    <header><h2 class="display">${fmtDate(ds)}</h2><button class="x" aria-label="Close">✕</button></header>
+    <div class="body">
+      <div class="custody-row">
+        ${cp?`<span class="custody-tag" style="background:${cp.color}">${esc(cp.name)}'s day${c.override?' (swapped)':''}</span>`
+            :`<span class="empty">No custody day set.</span>`}
+      </div>
+      <div class="section-h">On this day</div>
+      ${appts.length?appts.map(a=>apptCard(a,ds)).join(''):`<div class="empty">Nothing scheduled.</div>`}
+    </div>`;
+    showSheet('#daysheet');
+    sheet.querySelector('.x').onclick=closeSheets;
+    return;
+  }
+
+  const o=other();
   const ps=c.pendingSwap;
   const swapTarget = c.pid===D.parents[0].id?D.parents[1].id:D.parents[0].id;
-  const sheet=$('#daysheet');
 
   let swapUI='';
   if(ps){
@@ -374,7 +420,8 @@ async function respondProposal(id, action){
 
 function apptCard(a, ds){
   const kid=D.kids.find(k=>k.id===a.kid_id);
-  const baseActions=`<button class="btn small" data-act="edit" data-id="${a.id}">Edit</button>
+  const readOnly = D.role==='kid';
+  const baseActions = readOnly ? '' : `<button class="btn small" data-act="edit" data-id="${a.id}">Edit</button>
                      <button class="btn small danger" data-act="del" data-id="${a.id}">Delete</button>`;
 
   if(a.type==='birthday'){
@@ -399,6 +446,14 @@ function apptCard(a, ds){
 
   // Pending banner + action buttons
   let banner='', actions=baseActions;
+  if(readOnly){
+    // Kids: show the ownership state, but no action buttons at all.
+    return `<div class="appt ${p?'ispending':''}">
+      <div class="top"><b>${esc(a.title)}</b>${a.time?`<span>${fmtTime(a.time)}</span>`:''}</div>
+      <div class="meta">${a.type==='event'?'Event &middot; ':''}${kid?esc(kid.name)+' &middot; ':''}${a.notes?esc(a.notes):''}</div>
+      ${ownLine}
+    </div>`;
+  }
   if(p){
     const mineToAnswer = p.to_parent===D.me;
     const from = parent(p.from_parent).name;
@@ -499,12 +554,17 @@ function openSettings(){
     <button class="btn primary" id="sc-save" style="width:100%">Save schedule</button>
     <p class="empty" style="margin:8px 0 6px">Weeks alternate automatically from there, forever. One-off switches are done from the day itself (open a day → Switch).</p>
     <div class="section-h">Kids</div>
-    <div id="kidlist">${D.kids.map(k=>`<div class="kidrow"><span>${esc(k.name)}</span>
-      <button class="btn small danger" data-kid="${k.id}">Remove</button></div>`).join('')||'<div class="empty">No kids added yet.</div>'}</div>
+    <div id="kidlist">${D.kids.map(k=>`<div class="kidrow"><span>${esc(k.name)}${k.hasPin?' <span class="tag">view-only login on</span>':''}</span>
+      <span style="display:flex;gap:6px">
+        <button class="btn small" data-kidpin="${k.id}" data-has="${k.hasPin?1:0}">${k.hasPin?'Change PIN':'Set PIN'}</button>
+        ${k.hasPin?`<button class="btn small" data-kidpinoff="${k.id}">Turn off</button>`:''}
+        <button class="btn small danger" data-kid="${k.id}">Remove</button>
+      </span></div>`).join('')||'<div class="empty">No kids added yet.</div>'}</div>
     <div class="addkid"><input id="k-name" placeholder="Kid's name"><button class="btn" id="k-add">Add</button></div>
+    <p class="empty" style="margin:6px 0 0">Give a kid a PIN and they can sign in to see the calendar — but not change anything.</p>
 
     <div class="section-h">Email notifications</div>
-    ${D.mailReady?'':`<div class="warn">Email isn't switched on yet. Add SMTP_HOST, SMTP_USER and SMTP_PASS in your Railway variables and redeploy — the settings below will start working right away.</div>`}
+    ${D.mailReady?'':`<div class="warn">Email isn't switched on yet. Add RESEND_API_KEY (and MAIL_FROM) in your Railway variables and redeploy — the settings below will start working right away.</div>`}
     <div class="field"><label>Your email</label><input id="n-email" type="email" placeholder="name@email.com" value="${esc(mine.email||'')}"></div>
     <label class="check"><input type="checkbox" id="n-on" ${mine.notify?'checked':''}> Email me when ${esc(other().name)} needs my OK or answers one of my requests</label>
     <button class="btn primary" id="n-save" style="width:100%; margin-top:10px">Save notification settings</button>
@@ -540,6 +600,30 @@ function openSettings(){
       if(!yes) return;
       await api('/api/kids/'+b.dataset.kid,{method:'DELETE'});
       await refresh(); renderApp(); openSettings();
+    };
+  });
+  sheet.querySelectorAll('[data-kidpin]').forEach(b=>{
+    b.onclick=async()=>{
+      const has=b.dataset.has==='1';
+      const pin=await ask({ title: has?'Change this kid\u2019s PIN':'Set a PIN for this kid',
+        body:'They\u2019ll use it to sign in and view the calendar (they can\u2019t change anything).',
+        placeholder:'At least 4 digits', ok:'Save PIN' });
+      if(pin===null) return;
+      const v=(pin||'').trim();
+      if(v.length<4){ toast('PIN must be at least 4 digits'); return; }
+      try{
+        await api('/api/kids/'+b.dataset.kidpin+'/pin',{method:'POST',body:{pin:v}});
+        await refresh(); renderApp(); openSettings(); toast('PIN saved');
+      }catch(e){ toast(e.error||'Could not save PIN'); }
+    };
+  });
+  sheet.querySelectorAll('[data-kidpinoff]').forEach(b=>{
+    b.onclick=async()=>{
+      const yes=await ask({ title:'Turn off this kid\u2019s login?',
+        body:'They won\u2019t be able to sign in until you set a new PIN.', input:false, ok:'Turn off', danger:true });
+      if(!yes) return;
+      await api('/api/kids/'+b.dataset.kidpinoff+'/pin',{method:'POST',body:{pin:null}});
+      await refresh(); renderApp(); openSettings(); toast('Login turned off');
     };
   });
   $('#n-save').onclick=async()=>{
