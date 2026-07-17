@@ -1,31 +1,24 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-// Configure in Railway → Variables. Works with Gmail, Resend, SendGrid, Mailgun, etc.
-//   SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS
-//   MAIL_FROM   e.g. "Our Calendar <calendar@yourdomain.com>"  (falls back to SMTP_USER)
-//   APP_URL     e.g. "https://yourapp.up.railway.app"  (used for the button link)
-const HOST = process.env.SMTP_HOST;
-const PORT = +(process.env.SMTP_PORT || 587);
-const USER = process.env.SMTP_USER;
-const PASS = process.env.SMTP_PASS;
-const FROM = process.env.MAIL_FROM || (USER ? `Our Calendar <${USER}>` : null);
+
+// Configure in Railway → Variables. Sends over HTTPS (port 443), so it works on
+// hosts that block outbound SMTP (like Railway).
+//   RESEND_API_KEY   your Resend API key (starts with "re_")
+//   MAIL_FROM        e.g. "Our Calendar <calendar@yourdomain.com>"
+//                    must be an address on a domain you've verified in Resend,
+//                    or use "onboarding@resend.dev" for sandbox testing
+//   APP_URL          e.g. "https://yourapp.up.railway.app"  (used for the button link)
+const API_KEY = process.env.RESEND_API_KEY;
+const FROM = process.env.MAIL_FROM || 'Our Calendar <onboarding@resend.dev>';
 const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
 
-const enabled = !!(HOST && USER && PASS);
-let tx = null;
+const enabled = !!API_KEY;
+let resend = null;
 if (enabled) {
-  tx = nodemailer.createTransport({
-    host: HOST,
-    port: PORT,
-    secure: PORT === 465,
-    auth: { user: USER, pass: PASS }
-  });
-  tx.verify().then(
-    () => console.log(`[mail] SMTP ready via ${HOST}`),
-    e => console.warn(`[mail] SMTP not reachable: ${e.message}`)
-  );
+  resend = new Resend(API_KEY);
+  console.log(`[mail] Resend ready — sending as ${FROM}`);
 } else {
-  console.log('[mail] Email disabled — set SMTP_HOST, SMTP_USER, SMTP_PASS to turn it on.');
+  console.log('[mail] Email disabled — set RESEND_API_KEY to turn it on.');
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -63,11 +56,24 @@ function shell(heading, accent, rows, cta) {
   </div>`;
 }
 
-function send(to, subject, html) {
+async function send(to, subject, html, attempt = 1) {
   if (!enabled || !to) return;
-  tx.sendMail({ from: FROM, to, subject, html })
-    .then(() => console.log(`[mail] sent "${subject}" -> ${to}`))
-    .catch(e => console.warn(`[mail] failed "${subject}" -> ${to}: ${e.message}`));
+  try {
+    const { data, error } = await resend.emails.send({ from: FROM, to, subject, html });
+    if (error) throw new Error(error.message || JSON.stringify(error));
+    console.log(`[mail] sent "${subject}" -> ${to} (${data?.id || 'ok'})`);
+  } catch (e) {
+    const msg = e.message || String(e);
+    // Retry only on transient errors (network blips, rate limits, 5xx).
+    const transient = /timeout|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|rate.?limit|429|5\d\d/i.test(msg);
+    if (transient && attempt < 4) {
+      const delay = 2000 * 2 ** (attempt - 1); // 2s, 4s, 8s
+      console.warn(`[mail] retry ${attempt} for "${subject}" -> ${to} in ${delay}ms: ${msg}`);
+      setTimeout(() => send(to, subject, html, attempt + 1), delay);
+      return;
+    }
+    console.error(`[mail] GAVE UP "${subject}" -> ${to}: ${msg}`);
+  }
 }
 
 const LABEL = { appointment: 'appointment', event: 'event', birthday: 'birthday' };
