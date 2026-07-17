@@ -10,6 +10,8 @@ async function boot(){
   // Poll while the app is actually on screen; pause in the background to save battery.
   pollTimer = setInterval(async ()=>{
     if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+    // Don't rebuild the UI while a sheet is open — it would wipe a half-typed form.
+    if (document.querySelector('.sheet.open')) return;
     try{ await refresh(); renderApp(true); }catch(e){}
   }, 25000);
 }

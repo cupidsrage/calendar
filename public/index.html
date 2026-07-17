@@ -302,6 +302,14 @@ button, .day{ -webkit-tap-highlight-color:transparent; user-select:none }
 </div>
 <div class="toast" id="toast"></div>
 <script>
+/* Global safety net: an uncaught error should never silently blank the app. */
+window.addEventListener('error', e => {
+  console.error('Uncaught:', e.error || e.message);
+  try { toast('Something glitched \u2014 reload if it looks off'); } catch(_){}
+});
+window.addEventListener('unhandledrejection', e => {
+  console.error('Unhandled promise rejection:', e.reason);
+});
 /* ============ tiny state + api ============ */
 const $ = s => document.querySelector(s);
 let token = localStorage.getItem('cc_token') || null;
@@ -339,7 +347,7 @@ const DOWS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const pad=n=>String(n).padStart(2,'0');
 const monthKey=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}`;
 const todayStr=()=>{const t=new Date();return `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;};
-function fmtDate(ds){ const [y,m,d]=ds.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}); }
+function fmtDate(ds){ if(!ds || !/^\d{4}-\d{2}-\d{2}$/.test(ds)) return '\u2014'; const [y,m,d]=ds.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}); }
 function fmtTime(t){ if(!t) return ''; let [h,m]=t.split(':').map(Number); const ap=h>=12?'PM':'AM'; h=h%12||12; return `${h}:${pad(m)} ${ap}`; }
 
 /* ============ modal (replaces prompt/confirm, which are unreliable in PWAs) ============ */
@@ -457,9 +465,10 @@ function custodyFor(ds){
 }
 // Items landing on a date; birthdays match month+day every year.
 function itemsOn(ds){
-  return D.appointments.filter(a =>
-    a.type==='birthday' ? a.date.slice(5)===ds.slice(5) : a.date===ds
-  );
+  return D.appointments.filter(a => {
+    if(!a || !a.date) return false;                 // skip corrupt rows instead of crashing
+    return a.type==='birthday' ? a.date.slice(5)===ds.slice(5) : a.date===ds;
+  });
 }
 function bdayAge(a, ds){
   const by=+a.date.slice(0,4), y=+ds.slice(0,4);
