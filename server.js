@@ -109,6 +109,29 @@ if (apptCols.length && !apptCols.some(c => c.name === 'type')) {
     DROP TABLE appointments_old;
   `);
 }
+// Kid logins: give kids optional PIN credentials (nullable — existing kids just have no login yet).
+const kidCols = db.prepare("PRAGMA table_info(kids)").all();
+if (kidCols.length && !kidCols.some(c => c.name === 'pin_hash')) {
+  db.exec(`ALTER TABLE kids ADD COLUMN pin_salt TEXT;
+           ALTER TABLE kids ADD COLUMN pin_hash TEXT;`);
+}
+// Sessions can belong to a parent or a kid; add nullable kid_id and relax parent_id.
+const sessCols = db.prepare("PRAGMA table_info(sessions)").all();
+if (sessCols.length && !sessCols.some(c => c.name === 'kid_id')) {
+  db.exec(`
+    ALTER TABLE sessions RENAME TO sessions_old;
+    CREATE TABLE sessions (
+      token TEXT PRIMARY KEY,
+      parent_id INTEGER,
+      kid_id INTEGER,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO sessions (token, parent_id, kid_id, created_at)
+      SELECT token, parent_id, NULL, created_at FROM sessions_old;
+    DROP TABLE sessions_old;
+  `);
+}
+
 // Old requests table is superseded by proposals; history is not worth migrating.
 db.exec(`DROP TABLE IF EXISTS requests;`);
 
@@ -121,7 +144,15 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Not signed in' });
   const s = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
   if (!s) return res.status(401).json({ error: 'Session expired. Sign in again.' });
-  req.parentId = s.parent_id;
+  req.parentId = s.parent_id;      // null for kid sessions
+  req.kidId = s.kid_id;            // null for parent sessions
+  req.role = s.kid_id ? 'kid' : 'parent';
+  next();
+}
+
+// Gate mutating routes: kids can read but never write.
+function parentOnly(req, res, next) {
+  if (req.role !== 'parent') return res.status(403).json({ error: 'View-only account' });
   next();
 }
 
@@ -160,7 +191,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ---------- setup & login ----------
 app.get('/api/state', (req, res) => {
   const parents = db.prepare('SELECT id, name, color FROM parents ORDER BY id').all();
-  res.json({ needsSetup: parents.length < 2, parents });
+  // Only kids who have a PIN set can sign in — surface them for the login picker.
+  const kidLogins = db.prepare('SELECT id, name FROM kids WHERE pin_hash IS NOT NULL ORDER BY name').all();
+  res.json({ needsSetup: parents.length < 2, parents, kidLogins });
 });
 
 app.post('/api/setup', (req, res) => {
@@ -197,6 +230,32 @@ app.post('/api/login', (req, res) => {
   res.json({ token, parent: { id: p.id, name: p.name, color: p.color } });
 });
 
+app.post('/api/kid-login', (req, res) => {
+  const { kid_id, pin } = req.body || {};
+  const k = db.prepare('SELECT * FROM kids WHERE id = ?').get(kid_id);
+  if (!k || !k.pin_hash || hashPin(pin || '', k.pin_salt) !== k.pin_hash)
+    return res.status(401).json({ error: 'Wrong PIN' });
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare('INSERT INTO sessions (token, parent_id, kid_id, created_at) VALUES (?,?,?,?)')
+    .run(token, null, k.id, now());
+  res.json({ token, kid: { id: k.id, name: k.name } });
+});
+
+// Parents set or clear a kid's PIN (enables/disables that kid's read-only login).
+app.post('/api/kids/:id/pin', auth, parentOnly, (req, res) => {
+  const k = db.prepare('SELECT id FROM kids WHERE id = ?').get(req.params.id);
+  if (!k) return res.status(404).json({ error: 'No such kid' });
+  const { pin } = req.body || {};
+  if (pin === null || pin === '') {
+    db.prepare('UPDATE kids SET pin_salt = NULL, pin_hash = NULL WHERE id = ?').run(k.id);
+    return res.json({ ok: true, hasPin: false });
+  }
+  if (String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 digits' });
+  const salt = crypto.randomBytes(8).toString('hex');
+  db.prepare('UPDATE kids SET pin_salt = ?, pin_hash = ? WHERE id = ?').run(salt, hashPin(pin, salt), k.id);
+  res.json({ ok: true, hasPin: true });
+});
+
 app.post('/api/logout', auth, (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token = ?').run(req.headers['x-token']);
   res.json({ ok: true });
@@ -230,12 +289,21 @@ app.get('/api/data', auth, (req, res) => {
     WHERE p.status != 'pending' ORDER BY p.responded_at DESC LIMIT 20
   `).all();
 
-  res.json({ me: req.parentId, parents, kids, schedule, overrides, appointments,
-             pending, history, mailReady: mail.enabled });
+  if (req.role === 'kid') {
+    // Kids see the calendar and appointments, but not the parent proposal/swap back-and-forth.
+    return res.json({ role: 'kid', me: null, kidId: req.kidId,
+      parents: parents.map(p => ({ id: p.id, name: p.name, color: p.color })),
+      kids: kids.map(k => ({ id: k.id, name: k.name })),
+      schedule, overrides, appointments, pending: [], history: [], mailReady: false });
+  }
+  // Parents: full view. Flag which kids have a login PIN set, for the settings screen.
+  const kidsOut = kids.map(k => ({ id: k.id, name: k.name, hasPin: !!k.pin_hash }));
+  res.json({ role: 'parent', me: req.parentId, parents, kids: kidsOut, schedule, overrides,
+             appointments, pending, history, mailReady: mail.enabled });
 });
 
 // ---------- notification settings ----------
-app.post('/api/me', auth, (req, res) => {
+app.post('/api/me', auth, parentOnly, (req, res) => {
   const { email, notify } = req.body || {};
   const e = (email || '').trim();
   if (e && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e))
@@ -246,7 +314,7 @@ app.post('/api/me', auth, (req, res) => {
 });
 
 // ---------- custody schedule (alternating weeks) ----------
-app.post('/api/schedule', auth, (req, res) => {
+app.post('/api/schedule', auth, parentOnly, (req, res) => {
   const { anchor_date, anchor_parent } = req.body || {};
   if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor_date || '') || !anchor_parent)
     return res.status(400).json({ error: 'anchor_date and anchor_parent required' });
@@ -257,14 +325,14 @@ app.post('/api/schedule', auth, (req, res) => {
 });
 
 // ---------- kids ----------
-app.post('/api/kids', auth, (req, res) => {
+app.post('/api/kids', auth, parentOnly, (req, res) => {
   const name = (req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Name required' });
   const r = db.prepare('INSERT INTO kids (name) VALUES (?)').run(name);
   res.json({ id: r.lastInsertRowid, name });
 });
 
-app.delete('/api/kids/:id', auth, (req, res) => {
+app.delete('/api/kids/:id', auth, parentOnly, (req, res) => {
   db.prepare('UPDATE appointments SET kid_id = NULL WHERE kid_id = ?').run(req.params.id);
   db.prepare('DELETE FROM kids WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
@@ -284,7 +352,7 @@ function propose({ kind, from, to, appointment_id = null, date = null, to_parent
 }
 
 // ---------- appointments ----------
-app.post('/api/appointments', auth, (req, res) => {
+app.post('/api/appointments', auth, parentOnly, (req, res) => {
   const { type, title, kid_id, date, time, notes, parent_id, message } = req.body || {};
   if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(date || ''))
     return res.status(400).json({ error: 'Title and date are required' });
@@ -321,7 +389,7 @@ app.post('/api/appointments', auth, (req, res) => {
   res.json({ id, pending: needsApproval });
 });
 
-app.put('/api/appointments/:id', auth, (req, res) => {
+app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
   const a = db.prepare('SELECT * FROM appointments WHERE id = ?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'Not found' });
   const b = req.body || {};
@@ -383,7 +451,7 @@ app.put('/api/appointments/:id', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/appointments/:id', auth, (req, res) => {
+app.delete('/api/appointments/:id', auth, parentOnly, (req, res) => {
   const a = db.prepare('SELECT * FROM appointments WHERE id = ?').get(req.params.id);
   db.prepare("UPDATE proposals SET status='cancelled', responded_at=? WHERE appointment_id=? AND status='pending'")
     .run(now(), req.params.id);
@@ -396,7 +464,7 @@ app.delete('/api/appointments/:id', auth, (req, res) => {
 });
 
 // Hand an appointment you own to the other parent (the "can you cover this?" flow).
-app.post('/api/appointments/:id/handoff', auth, (req, res) => {
+app.post('/api/appointments/:id/handoff', auth, parentOnly, (req, res) => {
   const a = db.prepare('SELECT * FROM appointments WHERE id = ?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'Not found' });
   if (a.type === 'birthday') return res.status(400).json({ error: "Birthdays don't need anyone to take them" });
@@ -418,7 +486,7 @@ app.post('/api/appointments/:id/handoff', auth, (req, res) => {
 
 // ---------- custody day swaps ----------
 // Proposing a swap does NOT change the calendar until the other parent accepts.
-app.post('/api/swap', auth, (req, res) => {
+app.post('/api/swap', auth, parentOnly, (req, res) => {
   const { date, parent_id, message } = req.body || {};
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return res.status(400).json({ error: 'Bad date' });
   const other = otherParent(req.parentId);
@@ -437,7 +505,7 @@ app.post('/api/swap', auth, (req, res) => {
 });
 
 // ---------- respond to / cancel a proposal ----------
-app.post('/api/proposals/:id/respond', auth, (req, res) => {
+app.post('/api/proposals/:id/respond', auth, parentOnly, (req, res) => {
   const p = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
   if (!p || p.status !== 'pending') return res.status(400).json({ error: 'This is no longer pending' });
   if (p.to_parent !== req.parentId) return res.status(403).json({ error: "This isn't yours to answer" });
@@ -480,7 +548,7 @@ app.post('/api/proposals/:id/respond', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/proposals/:id/cancel', auth, (req, res) => {
+app.post('/api/proposals/:id/cancel', auth, parentOnly, (req, res) => {
   const p = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
   if (!p || p.status !== 'pending') return res.status(400).json({ error: 'This is no longer pending' });
   if (p.from_parent !== req.parentId) return res.status(403).json({ error: 'Only the sender can withdraw this' });
