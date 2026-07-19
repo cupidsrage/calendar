@@ -96,6 +96,12 @@ header.app{
 .dow{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; margin-bottom:6px}
 .dow div{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); text-align:center}
 .grid{display:grid; grid-template-columns:repeat(7,1fr); gap:6px}
+/* Wrapper that clips the grid while it's zoomed/panned (phone). */
+.grid-view{overflow:hidden; touch-action:pan-y}
+.grid-view.zoomed{touch-action:none}                 /* we handle panning ourselves when zoomed */
+.grid-inner{transform-origin:0 0; transition:transform .04s linear}
+.grid-view.zooming .grid-inner{transition:none}      /* no lag while pinching */
+.grid-view.zooming .day{pointer-events:none}         /* don't open a day mid-pinch */
 .day{
   background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
   min-height:104px; padding:6px; text-align:left; display:flex; flex-direction:column; gap:4px;
@@ -217,12 +223,24 @@ header.app{
 .toast.show{opacity:1}
 
 @media(max-width:680px){
-  .day{min-height:74px; padding:4px}
+  /* Fit the whole month on screen: the app is exactly one viewport tall,
+     and the calendar flexes to fill whatever's left under the header + legend.
+     Rows share that height evenly, so 5- and 6-row months both fit without scrolling. */
+  html,body{height:100%; overflow:hidden}
+  #app{display:flex; flex-direction:column; height:100dvh}
+  header.app{position:static; flex:0 0 auto}
+  .legend{flex:0 0 auto}
+  .cal-wrap{flex:1 1 auto; display:flex; flex-direction:column; min-height:0;
+            padding:8px 8px calc(6px + env(safe-area-inset-bottom)); max-width:none}
+  .dow{flex:0 0 auto; gap:4px; margin-bottom:4px}
+  .grid-view{flex:1 1 auto; min-height:0}
+  .grid{height:100%; grid-auto-rows:1fr; gap:4px}
+  /* Cells now stretch to fill their row instead of using a fixed min-height. */
+  .day{min-height:0; padding:4px; overflow:hidden}
   .day .who{position:static; align-self:flex-end; order:-1}
   .chip .t{display:none}
   .monthnav .month{min-width:0; font-size:16px}
-  .cal-wrap{padding:10px 8px 28px}
-  .legend{padding:8px 10px 0}
+  .legend{padding:6px 10px 0}
 }
 @media(prefers-reduced-motion:reduce){ .sheet{transition:none} }
 
@@ -242,7 +260,7 @@ header.app{
   .btn.small{padding:7px 12px; font-size:13.5px}
   .iconbtn{padding:9px 12px; font-size:17px}
   .field input,.field select,.field textarea{padding:11px 12px; font-size:16px} /* 16px stops iOS zoom-on-focus */
-  .day{min-height:82px}
+  /* (day height is handled by the fit-to-screen rules above — no fixed min-height here) */
 
   /* Sheets slide up from the bottom like a native panel, not in from the side. */
   .sheet{

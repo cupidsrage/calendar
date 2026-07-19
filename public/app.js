@@ -155,7 +155,7 @@ function renderApp(preserve){
   </div>
   <div class="cal-wrap">
     <div class="dow">${DOWS.map(d=>`<div>${d}</div>`).join('')}</div>
-    <div class="grid" id="grid"></div>
+    <div class="grid-view" id="gridview"><div class="grid-inner" id="gridinner"><div class="grid" id="grid"></div></div></div>
   </div>
   <div class="overlay" id="overlay"></div>
   <div class="sheet" id="daysheet"></div>
@@ -175,6 +175,98 @@ function renderApp(preserve){
 
   if (wasOpen==='daysheet' && openDate) openDay(openDate);
   else if (wasOpen==='inboxsheet') openInbox();
+
+  setupGridZoom();
+}
+
+/* ============ pinch-to-zoom on the calendar grid (touch only) ============
+   Scales ONLY the grid — header, legend and sheets stay put. At 1x the grid
+   fits the screen (fit-to-screen CSS); pinching past 1x lets you zoom in on a
+   busy week and pan around it. Double-tap resets to fit. */
+let gridZoom = { scale:1, x:0, y:0 };
+function setupGridZoom(){
+  const view = $('#gridview'), inner = $('#gridinner');
+  if(!view || !inner) return;
+  // Touch devices only — leave desktop mouse behaviour completely alone.
+  if(!('ontouchstart' in window) && !(navigator.maxTouchPoints>0)) return;
+
+  // Fresh render — start at fit-to-screen.
+  gridZoom = { scale:1, x:0, y:0 };
+  applyGridZoom(inner);
+
+  let startDist=0, startScale=1, startMid=null, startXY=null;
+  let panStart=null;                 // one-finger pan when already zoomed
+  let lastTap=0;
+
+  const dist=(t)=>Math.hypot(t[0].clientX-t[1].clientX, t[0].clientY-t[1].clientY);
+  const mid=(t)=>({ x:(t[0].clientX+t[1].clientX)/2, y:(t[0].clientY+t[1].clientY)/2 });
+  const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+
+  view.addEventListener('touchstart', e=>{
+    if(e.touches.length===2){
+      // Begin a pinch. Remember the starting spread, scale, and the screen point
+      // under the fingers so we can zoom toward it.
+      startDist=dist(e.touches); startScale=gridZoom.scale;
+      const r=view.getBoundingClientRect(); const m=mid(e.touches);
+      startMid={ x:m.x-r.left, y:m.y-r.top };
+      startXY={ x:gridZoom.x, y:gridZoom.y };
+      view.classList.add('zooming');
+      e.preventDefault();
+    } else if(e.touches.length===1 && gridZoom.scale>1.01){
+      // Pan the zoomed grid with one finger.
+      panStart={ x:e.touches[0].clientX-gridZoom.x, y:e.touches[0].clientY-gridZoom.y };
+    }
+  }, { passive:false });
+
+  view.addEventListener('touchmove', e=>{
+    if(e.touches.length===2 && startDist){
+      const next=clamp(startScale * dist(e.touches)/startDist, 1, 3);
+      // Keep the pinch midpoint anchored: solve for translate so the same grid
+      // point stays under the fingers as scale changes.
+      const k = next/startScale;
+      gridZoom.scale = next;
+      gridZoom.x = startMid.x - (startMid.x - startXY.x)*k;
+      gridZoom.y = startMid.y - (startMid.y - startXY.y)*k;
+      constrainPan(view, inner);
+      applyGridZoom(inner);
+      e.preventDefault();
+    } else if(e.touches.length===1 && panStart){
+      gridZoom.x = e.touches[0].clientX - panStart.x;
+      gridZoom.y = e.touches[0].clientY - panStart.y;
+      constrainPan(view, inner);
+      applyGridZoom(inner);
+      e.preventDefault();
+    }
+  }, { passive:false });
+
+  view.addEventListener('touchend', e=>{
+    if(e.touches.length<2){ startDist=0; view.classList.remove('zooming'); }
+    if(e.touches.length===0){
+      panStart=null;
+      // Double-tap to reset to fit.
+      const nowT=Date.now();
+      if(nowT-lastTap<300 && gridZoom.scale>1.01){
+        gridZoom={ scale:1, x:0, y:0 }; applyGridZoom(inner);
+      }
+      lastTap=nowT;
+      // Snap back to exactly 1x if within a hair (avoids a stuck 1.02x).
+      if(gridZoom.scale<1.02 && gridZoom.scale!==1){ gridZoom={scale:1,x:0,y:0}; applyGridZoom(inner); }
+    }
+  });
+}
+function applyGridZoom(inner){
+  inner.style.transform = `translate(${gridZoom.x}px,${gridZoom.y}px) scale(${gridZoom.scale})`;
+  // While zoomed in, mark the view so CSS can allow panning / block page scroll.
+  const view=inner.parentElement;
+  if(view) view.classList.toggle('zoomed', gridZoom.scale>1.01);
+}
+// Stop the grid being panned off into empty space.
+function constrainPan(view, inner){
+  if(gridZoom.scale<=1){ gridZoom.x=0; gridZoom.y=0; return; }
+  const vw=view.clientWidth, vh=view.clientHeight;
+  const cw=vw*gridZoom.scale, ch=vh*gridZoom.scale;
+  gridZoom.x = Math.min(0, Math.max(vw-cw, gridZoom.x));
+  gridZoom.y = Math.min(0, Math.max(vh-ch, gridZoom.y));
 }
 
 function renderGrid(){
@@ -727,7 +819,7 @@ function drawExpenses(){
   const settleLabel = bal>0 ? `Record a payment from ${esc(o.name)}` : `Record a payment to ${esc(o.name)}`;
 
   sheet.innerHTML = `
-  <header><h2 class="display">Shared expenses <span class="ver-tag">v6 · on-call</span></h2><button class="x" aria-label="Close">✕</button></header>
+  <header><h2 class="display">Shared expenses <span class="ver-tag">v7 · fit+zoom</span></h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
     <div class="balbox ${bal===0?'even':bal>0?'pos':'neg'}">${banner}
       ${canSettle?`<button class="btn small" id="e-settle" style="margin-top:12px">${settleLabel}</button>`:''}
