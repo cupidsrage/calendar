@@ -141,6 +141,7 @@ function renderApp(preserve){
       <button class="btn small" id="today">Today</button>
     </div>
     ${isKid?'':`<button class="iconbtn" id="inbox" aria-label="Approvals">⏳${inboxCount?`<span class="badge">${inboxCount}</span>`:''}</button>`}
+    ${isKid?'':`<button class="iconbtn" id="expenses" aria-label="Expenses">💰${expenseBadge()?`<span class="badge">${expenseBadge()}</span>`:''}</button>`}
     ${isKid?'':`<button class="iconbtn" id="settings" aria-label="Settings">⚙</button>`}
     <button class="btn small" id="signout">Sign out</button>
   </header>
@@ -158,6 +159,7 @@ function renderApp(preserve){
   <div class="overlay" id="overlay"></div>
   <div class="sheet" id="daysheet"></div>
   <div class="sheet" id="inboxsheet"></div>
+  <div class="sheet" id="expsheet"></div>
   <div class="sheet" id="setsheet"></div>`;
 
   renderGrid();
@@ -165,6 +167,7 @@ function renderApp(preserve){
   $('#next').onclick=()=>{ view.setMonth(view.getMonth()+1); refresh().then(()=>renderApp()); };
   $('#today').onclick=()=>{ view=new Date(); view.setDate(1); refresh().then(()=>renderApp()); };
   if($('#inbox')) $('#inbox').onclick=()=>openInbox();
+  if($('#expenses')) $('#expenses').onclick=()=>openExpenses();
   if($('#settings')) $('#settings').onclick=()=>openSettings();
   $('#signout').onclick=async()=>{ try{await api('/api/logout',{method:'POST'});}catch(e){} signOutLocal(); };
   $('#overlay').onclick=closeSheets;
@@ -562,6 +565,244 @@ function openInbox(){
       }catch(e){ toast(e.error||'Something went wrong'); }
     };
   });
+}
+
+/* ============ expenses (shared-cost splitting) ============ */
+let EXP = null;              // last /api/expenses payload
+let expFormType = 'necessity';
+
+const cents = v => Math.round(parseFloat(v) * 100);
+const money = c => `$${(Math.abs(c)/100).toFixed(2)}`;
+const EXP_CATS = [['medical','Medical'],['school','School'],['clothing','Clothing'],['activities','Activities'],['other','Other']];
+const catLabel = c => (EXP_CATS.find(x=>x[0]===c)||[,'Other'])[1];
+
+// Count of expenses waiting on ME: requests to accept + necessities I could dispute
+// aren't a to-do, so only pending requests addressed to me + disputes I must resolve.
+function expenseBadge(){
+  if(!EXP) return 0;
+  const mine = EXP.expenses.filter(e =>
+    (e.type==='request' && e.status==='pending' && e.owed_by===EXP.me) ||
+    (e.status==='disputed' && e.created_by===EXP.me)
+  );
+  return mine.length;
+}
+
+async function loadExpenses(){ EXP = await api('/api/expenses'); }
+
+async function openExpenses(){
+  try{ await loadExpenses(); }
+  catch(e){ toast(e.error||'Could not load expenses'); return; }
+  drawExpenses();
+  // Refresh the header badge now that we have data.
+  const b=$('#expenses'); if(b){ const n=expenseBadge();
+    b.innerHTML = `💰${n?`<span class="badge">${n}</span>`:''}`; b.onclick=()=>openExpenses(); }
+}
+
+function drawExpenses(){
+  const me = EXP.me;
+  const bal = EXP.balance_cents;
+  const o = other();
+  const sheet = $('#expsheet');
+
+  // Balance banner text: positive => other owes me.
+  let banner;
+  if(bal===0) banner = `<div class="balhead even">All square 👍</div><div class="balsub">Nobody owes anybody right now.</div>`;
+  else if(bal>0) banner = `<div class="balhead owed-you">${esc(o.name)} owes you <b>${money(bal)}</b></div><div class="balsub">Net of everything counted so far.</div>`;
+  else banner = `<div class="balhead you-owe">You owe ${esc(o.name)} <b>${money(bal)}</b></div><div class="balsub">Net of everything counted so far.</div>`;
+
+  // Split expenses into actionable buckets.
+  const all = EXP.expenses;
+  const needsMe = all.filter(e => (e.type==='request'&&e.status==='pending'&&e.owed_by===me)
+                               || (e.status==='disputed'&&e.created_by===me));
+  const waiting = all.filter(e => (e.type==='request'&&e.status==='pending'&&e.created_by===me)
+                               || (e.status==='disputed'&&e.owed_by===me));
+  const counted = all.filter(e => e.status==='owed');
+  const history = all.filter(e => e.status==='settled'||e.status==='declined');
+
+  const canSettle = counted.length>0;
+
+  sheet.innerHTML = `
+  <header><h2 class="display">Shared expenses</h2><button class="x" aria-label="Close">✕</button></header>
+  <div class="body">
+    <div class="balbox ${bal===0?'even':bal>0?'pos':'neg'}">${banner}
+      ${canSettle?`<button class="btn small" id="e-settle" style="margin-top:12px">Settle up${bal!==0?` — ${bal>0?'mark '+esc(o.name)+' paid you':'mark you paid '+esc(o.name)} ${money(bal)}`:''}</button>`:''}
+    </div>
+
+    <div class="section-h">Log an expense</div>
+    <div class="exp-toggle">
+      <button class="et ${expFormType==='necessity'?'sel':''}" data-t="necessity">Necessity <span>must split</span></button>
+      <button class="et ${expFormType==='request'?'sel':''}" data-t="request">Request <span>ask to split</span></button>
+    </div>
+    <div class="hint" id="e-typehint"></div>
+    <div class="field"><label>What was it</label><input id="e-desc" placeholder="e.g. Ava's dentist copay"></div>
+    <div class="exp-row">
+      <div class="field"><label>Amount</label><input id="e-amt" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0.00"></div>
+      <div class="field"><label>${esc(o.name)}'s share</label>
+        <select id="e-split">
+          <option value="50">Half (50%)</option>
+          <option value="0">None (0%)</option>
+          <option value="25">25%</option>
+          <option value="40">40%</option>
+          <option value="60">60%</option>
+          <option value="75">75%</option>
+          <option value="100">All (100%)</option>
+        </select>
+      </div>
+    </div>
+    <div class="exp-row">
+      <div class="field"><label>Category</label><select id="e-cat">${EXP_CATS.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join('')}</select></div>
+      <div class="field"><label>Date</label><input id="e-date" type="date" value="${todayStr()}"></div>
+    </div>
+    ${D.kids&&D.kids.length?`<div class="field"><label>Kid (optional)</label>
+      <select id="e-kid"><option value="">—</option>${D.kids.map(k=>`<option value="${k.id}">${esc(k.name)}</option>`).join('')}</select></div>`:''}
+    <div class="split-preview" id="e-preview"></div>
+    <button class="btn primary" id="e-save" style="width:100%">Log it</button>
+    <div class="err" id="e-err"></div>
+
+    ${needsMe.length?`<div class="section-h">Needs your answer</div>${needsMe.map(e=>expCard(e,'me')).join('')}`:''}
+    ${waiting.length?`<div class="section-h">Waiting on ${esc(o.name)}</div>${waiting.map(e=>expCard(e,'wait')).join('')}`:''}
+
+    <div class="section-h">Counted toward the balance</div>
+    ${counted.length?counted.map(e=>expCard(e,'counted')).join(''):'<div class="empty">Nothing outstanding.</div>'}
+
+    <div class="section-h">History</div>
+    ${history.length?history.slice(0,20).map(e=>expCard(e,'hist')).join(''):'<div class="empty">No settled or declined items yet.</div>'}
+  </div>`;
+
+  showSheet('#expsheet');
+  sheet.querySelector('.x').onclick=closeSheets;
+
+  // Type toggle
+  sheet.querySelectorAll('.et').forEach(b=>{
+    b.onclick=()=>{ expFormType=b.dataset.t;
+      sheet.querySelectorAll('.et').forEach(x=>x.classList.remove('sel')); b.classList.add('sel');
+      syncExpForm();
+    };
+  });
+
+  const syncPreview=()=>{
+    const amt=parseFloat($('#e-amt').value), pct=+$('#e-split').value;
+    const p=$('#e-preview');
+    if(!amt||amt<=0){ p.textContent=''; return; }
+    const share=Math.round(cents(amt)*pct/100);
+    p.innerHTML = pct===0
+      ? `${esc(o.name)} owes nothing — you're covering all of ${money(cents(amt))}.`
+      : pct===100
+      ? `${esc(o.name)} owes the full ${money(share)}.`
+      : `Splitting ${money(cents(amt))} — ${esc(o.name)}'s share is <b>${money(share)}</b>.`;
+  };
+  const syncExpForm=()=>{
+    $('#e-typehint').textContent = expFormType==='necessity'
+      ? `A shared cost that's owed by default. ${o.name} will see it as owed and can dispute it if something's off.`
+      : `You're asking ${o.name} to chip in. It won't count until ${o.name} accepts.`;
+    $('#e-save').textContent = expFormType==='necessity' ? 'Log it as owed' : `Ask ${o.name} to split`;
+    syncPreview();
+  };
+  $('#e-amt').oninput=syncPreview;
+  $('#e-split').onchange=syncPreview;
+  syncExpForm();
+
+  if($('#e-settle')) $('#e-settle').onclick=async()=>{
+    const note=await ask({ title:'Settle up?',
+      body: bal===0 ? 'This clears everything currently counted and resets the balance to zero.'
+           : bal>0 ? `This records that ${o.name} paid you ${money(bal)} and clears the balance.`
+                   : `This records that you paid ${o.name} ${money(bal)} and clears the balance.`,
+      placeholder:'Note (e.g. Venmo, cash) — optional', ok:'Settle up' });
+    if(note===null) return;
+    try{ await api('/api/expenses/settle',{method:'POST',body:{note:note||null}});
+      await openExpenses(); toast('Settled up'); }
+    catch(e){ toast(e.error||'Could not settle'); }
+  };
+
+  $('#e-save').onclick=async()=>{
+    const amt=parseFloat($('#e-amt').value);
+    const body={ amount_cents:cents($('#e-amt').value), split_pct:+$('#e-split').value,
+      description:$('#e-desc').value.trim(), category:$('#e-cat').value,
+      kid_id:$('#e-kid')?+$('#e-kid').value||null:null, date:$('#e-date').value, type:expFormType };
+    if(!body.description){ $('#e-err').textContent='Add a short description.'; return; }
+    if(!amt||amt<=0){ $('#e-err').textContent='Enter an amount greater than zero.'; return; }
+    if(!body.date){ $('#e-err').textContent='Pick a date.'; return; }
+    try{ const r=await api('/api/expenses',{method:'POST',body});
+      await openExpenses();
+      toast(r.status==='pending'?`Sent to ${o.name} — waiting on her`:'Logged');
+    }catch(e){ $('#e-err').textContent=e.error||'Could not save'; }
+  };
+
+  // Card action buttons
+  sheet.querySelectorAll('[data-exp]').forEach(b=>{
+    b.onclick=async()=>{
+      const id=b.dataset.exp, act=b.dataset.act;
+      try{
+        if(act==='accept'||act==='decline')
+          await api('/api/expenses/'+id+'/respond',{method:'POST',body:{action:act}});
+        else if(act==='dispute')
+          await api('/api/expenses/'+id+'/respond',{method:'POST',body:{action:'dispute'}});
+        else if(act==='reassert'||act==='withdraw')
+          await api('/api/expenses/'+id+'/resolve',{method:'POST',body:{action:act}});
+        else if(act==='del'){
+          const yes=await ask({title:'Remove this expense?',body:'It disappears for both of you.',input:false,ok:'Remove',danger:true});
+          if(!yes) return;
+          await api('/api/expenses/'+id,{method:'DELETE'});
+        }
+        await openExpenses();
+        toast(act==='accept'?'Accepted':act==='decline'?'Declined':act==='dispute'?'Disputed':act==='del'?'Removed':'Done');
+      }catch(e){ toast(e.error||'Something went wrong'); }
+    };
+  });
+}
+
+// One expense card. `box` = me | wait | counted | hist — controls which buttons show.
+function expCard(e, box){
+  const me = EXP.me;
+  const o = other();
+  const kid = D.kids.find(k=>k.id===e.kid_id);
+  const mine = e.created_by===me;            // I paid
+  const share = Math.round(e.amount_cents*e.split_pct/100);
+  const payer = mine ? 'You' : esc(o.name);
+  const ower  = mine ? esc(o.name) : 'you';
+
+  // One-line money summary from the viewer's angle.
+  let moneyLine;
+  if(e.status==='declined') moneyLine = `<span class="exp-dim">Not split — nothing owed</span>`;
+  else if(e.status==='settled') moneyLine = `<span class="exp-dim">Settled — ${money(share)} share</span>`;
+  else if(e.split_pct===0) moneyLine = `${payer} covered all of ${money(e.amount_cents)}`;
+  else moneyLine = `${payer} paid ${money(e.amount_cents)} · ${ower==='you'?'You owe':ower+' owes'} <b>${money(share)}</b>${e.split_pct!==50?` (${e.split_pct}%)`:''}`;
+
+  const badge = e.type==='necessity'
+    ? `<span class="exp-tag nec">necessity</span>`
+    : `<span class="exp-tag req">request</span>`;
+  const statusTag = e.status==='pending'?`<span class="exp-tag pend">pending</span>`
+    : e.status==='disputed'?`<span class="exp-tag disp">disputed</span>`
+    : e.status==='declined'?`<span class="exp-tag decl">declined</span>`
+    : e.status==='settled'?`<span class="exp-tag settl">settled</span>`:'';
+
+  let actions='';
+  if(box==='me'){
+    if(e.type==='request'&&e.status==='pending'&&e.owed_by===me)
+      actions=`<button class="btn small primary" data-exp="${e.id}" data-act="accept">Accept split</button>
+               <button class="btn small" data-exp="${e.id}" data-act="decline">Decline</button>`;
+    else if(e.status==='disputed'&&e.created_by===me)
+      actions=`<div class="exp-note">${esc(o.name)} disputed this.</div>
+               <button class="btn small primary" data-exp="${e.id}" data-act="reassert">Keep it (put back)</button>
+               <button class="btn small" data-exp="${e.id}" data-act="withdraw">Withdraw it</button>`;
+  } else if(box==='wait'){
+    if(e.status==='pending')
+      actions=`<span class="exp-dim">Waiting on ${esc(o.name)} to accept</span>
+               <button class="btn small danger" data-exp="${e.id}" data-act="del">Cancel</button>`;
+    else if(e.status==='disputed')
+      actions=`<span class="exp-dim">You disputed this — waiting on ${esc(o.name)} to resolve</span>`;
+  } else if(box==='counted'){
+    // A live, owed item. Payer can remove it; ower (if it's a necessity) can dispute.
+    if(mine) actions=`<button class="btn small danger" data-exp="${e.id}" data-act="del">Remove</button>`;
+    else if(e.type==='necessity') actions=`<button class="btn small" data-exp="${e.id}" data-act="dispute">Dispute</button>`;
+  }
+
+  return `<div class="exp ${box==='me'?'needsme':''}">
+    <div class="exp-top"><b>${esc(e.description)}</b>${badge}${statusTag}</div>
+    <div class="exp-meta">${catLabel(e.category)}${kid?' · '+esc(kid.name):''} · ${fmtDate(e.date)}</div>
+    <div class="exp-money">${moneyLine}</div>
+    ${actions?`<div class="actions">${actions}</div>`:''}
+  </div>`;
 }
 
 /* ---- settings ---- */

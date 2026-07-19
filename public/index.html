@@ -299,6 +299,40 @@ button, .day{ -webkit-tap-highlight-color:transparent; user-select:none }
   z-index:90; display:none;
 }
 .offline.show{display:block}
+/* ---- expenses ---- */
+.balbox{border:1px solid var(--line); border-radius:12px; padding:16px; text-align:center; margin-bottom:6px}
+.balbox.pos{background:#EAF2EF; border-color:#BFDbcF}
+.balbox.neg{background:#FBECE9; border-color:#E8C6BE}
+.balbox.even{background:#F2F4EF}
+.balhead{font-size:18px; font-weight:700}
+.balhead b{font-size:20px}
+.balhead.owed-you{color:#2F6D62}
+.balhead.you-owe{color:var(--danger)}
+.balsub{font-size:12.5px; color:var(--muted); margin-top:4px}
+.exp-toggle{display:flex; gap:8px; margin-bottom:8px}
+.exp-toggle .et{flex:1; border:1px solid var(--line); background:#fff; border-radius:10px; padding:10px; font-weight:700; cursor:pointer; display:flex; flex-direction:column; gap:2px; align-items:center}
+.exp-toggle .et span{font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.05em}
+.exp-toggle .et.sel{border-color:var(--ink); background:var(--ink); color:var(--paper)}
+.exp-toggle .et.sel span{color:#cdd3c7}
+.exp-row{display:flex; gap:10px}
+.exp-row .field{flex:1}
+.split-preview{font-size:13px; color:var(--muted); margin:2px 0 12px; min-height:16px}
+.exp{border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:#fff}
+.exp.needsme{border-color:#E8CFA8; background:#FDF3E7}
+.exp-top{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:15px}
+.exp-meta{font-size:12.5px; color:var(--muted); margin-top:3px}
+.exp-money{font-size:14px; margin-top:7px}
+.exp-money b{font-weight:800}
+.exp-dim{color:var(--muted); font-size:13px}
+.exp-note{font-size:13px; color:var(--muted); width:100%; margin-bottom:4px}
+.exp .actions{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; align-items:center}
+.exp-tag{font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; padding:2px 7px; border-radius:20px}
+.exp-tag.nec{background:#E7EFE9; color:#2F6D62}
+.exp-tag.req{background:#FBEEDD; color:#C0702A}
+.exp-tag.pend{background:#FDF3E7; color:#C0702A}
+.exp-tag.disp{background:#FBECE9; color:var(--danger)}
+.exp-tag.decl{background:#F0F1ED; color:var(--muted)}
+.exp-tag.settl{background:#E7EFE9; color:#2F6D62}
 </style>
 </head>
 <body>
