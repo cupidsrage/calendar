@@ -253,19 +253,18 @@ function expenseAnswered({ to, actor, action, next, item, share_cents }) {
   ], 'Open expenses'));
 }
 
-// A settle-up cleared the running balance.
-function expenseSettled({ to, actor, net_cents, count, note }) {
-  const A = esc(actor);
-  const dir = net_cents === 0 ? 'Everything was even.'
-    : net_cents > 0 ? `${A} marked that you paid them ${money(net_cents)}.`
-    : `${A} marked that they paid you ${money(net_cents)}.`;
-  send(to, `${actor} settled up the shared expenses`, shell(
-    `${A} settled up`, '#2F6D62',
+// A payment was recorded (full or partial).
+function expenseSettled({ to, actor, from_name, to_name, amount_cents, remaining_cents, note }) {
+  const paidLine = `${esc(from_name)} paid ${esc(to_name)} ${money(amount_cents)}`;
+  const remainLine = remaining_cents > 0
+    ? `${money(remaining_cents)} still owed after this.`
+    : 'That clears the balance — all square now.';
+  send(to, `${actor} recorded a payment: ${money(amount_cents)}`, shell(
+    `${esc(actor)} recorded a payment`, '#2F6D62',
     [
-      ['Cleared', `${count} expense${count === 1 ? '' : 's'}`],
-      ['Balance', dir],
-      note && ['Note', `\u201C${esc(note)}\u201D`],
-      ['Now', 'The running balance is back to zero.']
+      ['Payment', paidLine],
+      ['Balance', remainLine],
+      note && ['Note', `\u201C${esc(note)}\u201D`]
     ],
     'Open expenses'
   ));

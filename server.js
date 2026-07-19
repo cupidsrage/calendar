@@ -87,8 +87,9 @@ CREATE TABLE IF NOT EXISTS expenses (
 );
 CREATE TABLE IF NOT EXISTS settlements (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  by_parent    INTEGER NOT NULL,
-  net_cents    INTEGER NOT NULL,          -- signed net that was cleared (from by_parent's view)
+  from_parent  INTEGER NOT NULL,          -- who handed over the money
+  to_parent    INTEGER NOT NULL,          -- who received it
+  amount_cents INTEGER NOT NULL,          -- how much was actually paid (partial allowed)
   note         TEXT,
   created_at   TEXT NOT NULL
 );
@@ -617,9 +618,10 @@ app.post('/api/proposals/:id/cancel', auth, parentOnly, (req, res) => {
 //   request   — "would you split this?" Lands as 'pending'; the other parent
 //               accepts (-> 'owed') or declines (-> 'declined'). Only counts if accepted.
 //
-// The tally nets everything with status='owed' and no settle_id: what the other
-// parent owes you minus what you owe them, as one signed number. Settling stamps
-// every currently-owed row with a settle_id so it drops out of the running balance.
+// The tally nets two ledgers: expenses that are 'owed', minus payments recorded
+// in `settlements`. Expenses stay 'owed' forever once agreed — a payment doesn't
+// consume specific expenses, it just moves the running balance. This lets someone
+// pay PART of what they owe: the balance simply shrinks by the amount paid.
 const EXP_CATS = ['medical', 'school', 'clothing', 'activities', 'other'];
 
 // owed_by's share of one expense, in cents (rounded to the nearest cent).
@@ -627,16 +629,23 @@ const shareCents = e => Math.round(e.amount_cents * e.split_pct / 100);
 
 // Net balance between the two parents, from `viewer`'s perspective, in cents.
 // Positive => the other parent owes viewer; negative => viewer owes them.
+//   expense side: created_by paid, owed_by owes their share.
+//   payment side: from_parent handed money to to_parent, reducing what from_parent owed.
 function balanceFor(viewer) {
-  const rows = db.prepare(
-    "SELECT * FROM expenses WHERE status='owed' AND settle_id IS NULL"
-  ).all();
+  const other = otherParent(viewer);
+  const exp = db.prepare("SELECT * FROM expenses WHERE status='owed'").all();
   let net = 0;
-  for (const e of rows) {
+  for (const e of exp) {
     const share = shareCents(e);
-    // created_by paid; owed_by owes `share`. If viewer is the one owed, +; if viewer owes, -.
     if (e.created_by === viewer) net += share;       // they owe you their share
     else if (e.owed_by === viewer) net -= share;     // you owe them your share
+  }
+  // Payments: money the other paid you REDUCES what they owe (net down);
+  // money you paid them reduces what you owe (net up toward zero / positive).
+  const pays = db.prepare("SELECT * FROM settlements").all();
+  for (const p of pays) {
+    if (p.from_parent === other && p.to_parent === viewer) net -= p.amount_cents; // they paid you
+    else if (p.from_parent === viewer && p.to_parent === other) net += p.amount_cents; // you paid them
   }
   return net;
 }
@@ -731,36 +740,50 @@ app.post('/api/expenses/:id/resolve', auth, parentOnly, (req, res) => {
   res.json({ ok: true });
 });
 
-// Edit / delete an expense you logged (only while it hasn't been settled).
+// Edit / delete an expense you logged.
 app.delete('/api/expenses/:id', auth, parentOnly, (req, res) => {
   const e = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
   if (!e) return res.status(404).json({ error: 'Not found' });
   if (e.created_by !== req.parentId)
     return res.status(403).json({ error: 'Only the person who logged it can remove it' });
-  if (e.settle_id) return res.status(400).json({ error: 'This was already settled up' });
   db.prepare('DELETE FROM expenses WHERE id = ?').run(e.id);
   res.json({ ok: true });
 });
 
-// Settle up: everything currently 'owed' (and unsettled) gets stamped and drops
-// out of the running balance. This is the "your $60 and her $60 cancel to $0" moment.
+// Record a payment (full OR partial). The balance is a running tab, so a payment
+// just moves it toward zero by `amount_cents` — you can pay $30 against a $50 debt
+// and $20 stays owed. Direction is inferred from who currently owes whom, but the
+// payer is always the one recording it (you mark what you handed over / received).
 app.post('/api/expenses/settle', auth, parentOnly, (req, res) => {
-  const net = balanceFor(req.parentId); // signed, from this parent's view
-  const owed = db.prepare("SELECT id FROM expenses WHERE status='owed' AND settle_id IS NULL").all();
-  if (!owed.length) return res.status(400).json({ error: 'Nothing to settle up' });
-  const s = db.prepare('INSERT INTO settlements (by_parent, net_cents, note, created_at) VALUES (?,?,?,?)')
-    .run(req.parentId, net, (req.body?.note || '').trim() || null, now());
-  const sid = s.lastInsertRowid;
-  const stamp = db.prepare("UPDATE expenses SET status='settled', settle_id=? WHERE id=?");
-  const tx = db.transaction(ids => ids.forEach(row => stamp.run(sid, row.id)));
-  tx(owed);
+  const other = otherParent(req.parentId);
+  if (!other) return res.status(400).json({ error: 'No other parent configured' });
+  const bal = balanceFor(req.parentId);           // + => other owes me; - => I owe other
+  if (bal === 0) return res.status(400).json({ error: 'Nothing to settle — you\u2019re square' });
 
-  const addr = mailTo(otherParent(req.parentId));
+  // Who is paying whom is set by the sign of the balance. The debtor pays the creditor.
+  const from = bal > 0 ? other : req.parentId;     // debtor
+  const to   = bal > 0 ? req.parentId : other;     // creditor
+  const outstanding = Math.abs(bal);
+
+  // Amount: default to the full outstanding balance; allow a smaller partial amount.
+  let amt = req.body?.amount_cents == null ? outstanding : Math.round(Number(req.body.amount_cents));
+  if (!Number.isFinite(amt) || amt <= 0)
+    return res.status(400).json({ error: 'Enter an amount greater than zero' });
+  if (amt > outstanding)
+    return res.status(400).json({ error: `That's more than the ${(outstanding/100).toFixed(2)} owed. Enter up to that.` });
+
+  db.prepare('INSERT INTO settlements (from_parent, to_parent, amount_cents, note, created_at) VALUES (?,?,?,?,?)')
+    .run(from, to, amt, (req.body?.note || '').trim() || null, now());
+
+  const remaining = outstanding - amt;
+  const addr = mailTo(other);
   if (addr) mail.expenseSettled({
-    to: addr, actor: pName(req.parentId), net_cents: net, count: owed.length,
+    to: addr, actor: pName(req.parentId),
+    from_name: pName(from), to_name: pName(to),
+    amount_cents: amt, remaining_cents: remaining,
     note: (req.body?.note || '').trim() || null
   });
-  res.json({ ok: true, cleared: owed.length, net_cents: net });
+  res.json({ ok: true, paid_cents: amt, remaining_cents: remaining });
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
