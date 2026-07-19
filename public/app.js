@@ -589,6 +589,66 @@ function expenseBadge(){
 
 async function loadExpenses(){ EXP = await api('/api/expenses'); }
 
+// A two-field modal for recording a payment: amount (prefilled to the full balance)
+// plus an optional note. Resolves { amount_cents, note } or null if cancelled.
+function askPayment({ title, body, max }){
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-wrap';
+    const maxStr = (max/100).toFixed(2);
+    wrap.innerHTML = `
+      <div class="modal">
+        <h3>${esc(title)}</h3>
+        ${body ? `<p>${esc(body)}</p>` : ''}
+        <div class="field"><label>Amount paid</label>
+          <input class="pay-amt" type="number" inputmode="decimal" step="0.01" min="0" max="${maxStr}" value="${maxStr}"></div>
+        <div class="pay-quick">
+          <button type="button" class="btn small" data-full>Full ${money(max)}</button>
+          <button type="button" class="btn small" data-half>Half</button>
+        </div>
+        <div class="field"><label>Note (optional)</label>
+          <input class="pay-note" placeholder="e.g. Venmo, cash"></div>
+        <div class="modal-btns">
+          <button class="btn" data-x="0">Cancel</button>
+          <button class="btn primary" data-x="1">Record payment</button>
+        </div>
+        <div class="err pay-err"></div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const amtEl = wrap.querySelector('.pay-amt');
+    const noteEl = wrap.querySelector('.pay-note');
+    const errEl = wrap.querySelector('.pay-err');
+    requestAnimationFrame(() => { wrap.classList.add('open'); amtEl.focus(); amtEl.select(); });
+
+    wrap.querySelector('[data-full]').onclick = ()=>{ amtEl.value = maxStr; };
+    wrap.querySelector('[data-half]').onclick = ()=>{ amtEl.value = (Math.round(max/2)/100).toFixed(2); };
+
+    const done = val => { wrap.classList.remove('open'); setTimeout(()=>wrap.remove(),150); resolve(val); };
+    wrap.querySelectorAll('[data-x]').forEach(b => {
+      b.onclick = () => {
+        if(b.dataset.x !== '1') return done(null);
+        const amt = parseFloat(amtEl.value);
+        if(!amt || amt <= 0){ errEl.textContent = 'Enter an amount greater than zero.'; return; }
+        if(Math.round(amt*100) > max){ errEl.textContent = `That's more than the ${maxStr} owed.`; return; }
+        done({ amount_cents: Math.round(amt*100), note: noteEl.value.trim() });
+      };
+    });
+    wrap.onclick = e => { if(e.target === wrap) done(null); };
+  });
+}
+
+// A recorded payment row (from the settlements ledger).
+function paymentCard(p){
+  const me = EXP.me;
+  const fromMe = p.from_parent === me;
+  const fromName = fromMe ? 'You' : esc(parent(p.from_parent).name);
+  const toName = p.to_parent === me ? 'you' : esc(parent(p.to_parent).name);
+  return `<div class="exp pay">
+    <div class="exp-top"><b>${fromName} paid ${toName} ${money(p.amount_cents)}</b></div>
+    <div class="exp-meta">${p.created_at?fmtDate(p.created_at.slice(0,10)):''}${p.note?' · '+esc(p.note):''}</div>
+  </div>`;
+}
+
 async function openExpenses(){
   try{ await loadExpenses(); }
   catch(e){ toast(e.error||'Could not load expenses'); return; }
@@ -607,8 +667,8 @@ function drawExpenses(){
   // Balance banner text: positive => other owes me.
   let banner;
   if(bal===0) banner = `<div class="balhead even">All square 👍</div><div class="balsub">Nobody owes anybody right now.</div>`;
-  else if(bal>0) banner = `<div class="balhead owed-you">${esc(o.name)} owes you <b>${money(bal)}</b></div><div class="balsub">Net of everything counted so far.</div>`;
-  else banner = `<div class="balhead you-owe">You owe ${esc(o.name)} <b>${money(bal)}</b></div><div class="balsub">Net of everything counted so far.</div>`;
+  else if(bal>0) banner = `<div class="balhead owed-you">${esc(o.name)} owes you <b>${money(bal)}</b></div><div class="balsub">Running total across everything counted.</div>`;
+  else banner = `<div class="balhead you-owe">You owe ${esc(o.name)} <b>${money(bal)}</b></div><div class="balsub">Running total across everything counted.</div>`;
 
   // Split expenses into actionable buckets.
   const all = EXP.expenses;
@@ -617,15 +677,18 @@ function drawExpenses(){
   const waiting = all.filter(e => (e.type==='request'&&e.status==='pending'&&e.created_by===me)
                                || (e.status==='disputed'&&e.owed_by===me));
   const counted = all.filter(e => e.status==='owed');
-  const history = all.filter(e => e.status==='settled'||e.status==='declined');
+  const declined = all.filter(e => e.status==='declined');
+  const payments = (EXP.settlements||[]);
 
-  const canSettle = counted.length>0;
+  // You can record a payment whenever the balance isn't zero.
+  const canSettle = bal !== 0;
+  const settleLabel = bal>0 ? `Record a payment from ${esc(o.name)}` : `Record a payment to ${esc(o.name)}`;
 
   sheet.innerHTML = `
-  <header><h2 class="display">Shared expenses</h2><button class="x" aria-label="Close">✕</button></header>
+  <header><h2 class="display">Shared expenses <span class="ver-tag">v5 · partial pay</span></h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
     <div class="balbox ${bal===0?'even':bal>0?'pos':'neg'}">${banner}
-      ${canSettle?`<button class="btn small" id="e-settle" style="margin-top:12px">Settle up${bal!==0?` — ${bal>0?'mark '+esc(o.name)+' paid you':'mark you paid '+esc(o.name)} ${money(bal)}`:''}</button>`:''}
+      ${canSettle?`<button class="btn small" id="e-settle" style="margin-top:12px">${settleLabel}</button>`:''}
     </div>
 
     <div class="section-h">Log an expense</div>
@@ -665,8 +728,10 @@ function drawExpenses(){
     <div class="section-h">Counted toward the balance</div>
     ${counted.length?counted.map(e=>expCard(e,'counted')).join(''):'<div class="empty">Nothing outstanding.</div>'}
 
-    <div class="section-h">History</div>
-    ${history.length?history.slice(0,20).map(e=>expCard(e,'hist')).join(''):'<div class="empty">No settled or declined items yet.</div>'}
+    <div class="section-h">Payments</div>
+    ${payments.length?payments.slice(0,20).map(p=>paymentCard(p)).join(''):'<div class="empty">No payments recorded yet.</div>'}
+
+    ${declined.length?`<div class="section-h">Declined / withdrawn</div>${declined.slice(0,15).map(e=>expCard(e,'hist')).join('')}`:''}
   </div>`;
 
   showSheet('#expsheet');
@@ -703,15 +768,19 @@ function drawExpenses(){
   syncExpForm();
 
   if($('#e-settle')) $('#e-settle').onclick=async()=>{
-    const note=await ask({ title:'Settle up?',
-      body: bal===0 ? 'This clears everything currently counted and resets the balance to zero.'
-           : bal>0 ? `This records that ${o.name} paid you ${money(bal)} and clears the balance.`
-                   : `This records that you paid ${o.name} ${money(bal)} and clears the balance.`,
-      placeholder:'Note (e.g. Venmo, cash) — optional', ok:'Settle up' });
-    if(note===null) return;
-    try{ await api('/api/expenses/settle',{method:'POST',body:{note:note||null}});
-      await openExpenses(); toast('Settled up'); }
-    catch(e){ toast(e.error||'Could not settle'); }
+    const payer = bal>0 ? o.name : 'You';
+    const payee = bal>0 ? 'you' : o.name;
+    const res = await askPayment({
+      title: 'Record a payment',
+      body: `${payer} ${bal>0?'pays':'pay'} ${payee}. Full amount owed is ${money(Math.abs(bal))} — enter less for a partial payment.`,
+      max: Math.abs(bal)
+    });
+    if(res===null) return;
+    try{
+      const r = await api('/api/expenses/settle',{method:'POST',body:{amount_cents:res.amount_cents, note:res.note||null}});
+      await openExpenses();
+      toast(r.remaining_cents>0 ? `Recorded — ${money(r.remaining_cents)} still owed` : 'Recorded — all square');
+    }catch(e){ toast(e.error||'Could not record'); }
   };
 
   $('#e-save').onclick=async()=>{
