@@ -135,6 +135,12 @@ if (sessCols.length && !sessCols.some(c => c.name === 'kid_id')) {
 // Old requests table is superseded by proposals; history is not worth migrating.
 db.exec(`DROP TABLE IF EXISTS requests;`);
 
+// Multi-day events: optional end_date (YYYY-MM-DD). NULL = single-day, unchanged behavior.
+const apptCols2 = db.prepare("PRAGMA table_info(appointments)").all();
+if (apptCols2.length && !apptCols2.some(c => c.name === 'end_date')) {
+  db.exec(`ALTER TABLE appointments ADD COLUMN end_date TEXT;`);
+}
+
 // ---------- helpers ----------
 const now = () => new Date().toISOString();
 const hashPin = (pin, salt) => crypto.scryptSync(String(pin), salt, 32).toString('hex');
@@ -269,13 +275,17 @@ app.get('/api/data', auth, (req, res) => {
   const kids = db.prepare('SELECT * FROM kids ORDER BY name').all();
   const schedule = db.prepare('SELECT anchor_date, anchor_parent FROM schedule WHERE id = 1').get() || null;
   const overrides = db.prepare("SELECT * FROM overrides WHERE date LIKE ?").all(month + '%');
-  // Regular items in this month, plus birthdays whose MM matches (they recur yearly).
+  // Regular items in this month, plus birthdays whose MM matches (they recur yearly),
+  // plus multi-day events whose range overlaps this month (may start before / end after).
+  const mStart = month + '-01';
+  const mEnd = month + '-31';
   const appointments = db.prepare(`
     SELECT * FROM appointments
     WHERE (date LIKE ? AND type != 'birthday')
        OR (type = 'birthday' AND substr(date, 6, 2) = ?)
+       OR (end_date IS NOT NULL AND date <= ? AND end_date >= ?)
     ORDER BY date, time IS NULL, time
-  `).all(month + '%', month.slice(5, 7));
+  `).all(month + '%', month.slice(5, 7), mEnd, mStart);
 
   // All pending proposals (any month — you should always see what's waiting), plus recent history.
   const pending = db.prepare(`
@@ -342,7 +352,7 @@ app.delete('/api/kids/:id', auth, parentOnly, (req, res) => {
 // Anything that puts an obligation on the other parent is a PROPOSAL: it only
 // takes effect once they accept. Anything that only affects yourself is immediate.
 const ITEM_TYPES = ['appointment', 'event', 'birthday'];
-const EDIT_FIELDS = ['title', 'kid_id', 'date', 'time', 'notes', 'parent_id'];
+const EDIT_FIELDS = ['title', 'kid_id', 'date', 'end_date', 'time', 'notes', 'parent_id'];
 
 function propose({ kind, from, to, appointment_id = null, date = null, to_parent_on_date = null, payload = null, message = null }) {
   const r = db.prepare(`INSERT INTO proposals (kind, appointment_id, date, to_parent_on_date, payload, from_parent, to_parent, message, created_at)
@@ -353,10 +363,19 @@ function propose({ kind, from, to, appointment_id = null, date = null, to_parent
 
 // ---------- appointments ----------
 app.post('/api/appointments', auth, parentOnly, (req, res) => {
-  const { type, title, kid_id, date, time, notes, parent_id, message } = req.body || {};
+  const { type, title, kid_id, date, end_date, time, notes, parent_id, message } = req.body || {};
   if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(date || ''))
     return res.status(400).json({ error: 'Title and date are required' });
   const t = ITEM_TYPES.includes(type) ? type : 'appointment';
+  // Multi-day range is events-only. end >= start; store only genuine ranges.
+  let endD = null;
+  if (t === 'event' && end_date) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(end_date))
+      return res.status(400).json({ error: 'End date is invalid' });
+    if (end_date < date)
+      return res.status(400).json({ error: 'End date must be on or after the start date' });
+    if (end_date !== date) endD = end_date;
+  }
   const other = otherParent(req.parentId);
   // Birthdays have no owner; events may be unassigned; appointments default to the creator.
   const pid = t === 'birthday' ? null : (t === 'event' ? (parent_id || null) : (parent_id || req.parentId));
@@ -364,13 +383,13 @@ app.post('/api/appointments', auth, parentOnly, (req, res) => {
   // Assigning the OTHER parent needs their approval — the item lands unconfirmed.
   const needsApproval = !!pid && pid === other;
 
-  const r = db.prepare(`INSERT INTO appointments (type, title, kid_id, date, time, notes, parent_id, confirmed, created_by, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(t, title.trim(), kid_id || null, date, t === 'birthday' ? null : (time || null),
+  const r = db.prepare(`INSERT INTO appointments (type, title, kid_id, date, end_date, time, notes, parent_id, confirmed, created_by, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(t, title.trim(), kid_id || null, date, endD, t === 'birthday' ? null : (time || null),
          notes || null, pid, needsApproval ? 0 : 1, req.parentId, now());
   const id = r.lastInsertRowid;
 
-  const item = { id, type: t, title: title.trim(), date, time: t === 'birthday' ? null : (time || null), notes: notes || null };
+  const item = { id, type: t, title: title.trim(), date, end_date: endD, time: t === 'birthday' ? null : (time || null), notes: notes || null };
 
   if (needsApproval) {
     propose({ kind: 'assign', from: req.parentId, to: other, appointment_id: id, message: message || null });
@@ -397,11 +416,19 @@ app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
   const t = ITEM_TYPES.includes(b.type) ? b.type : a.type;
 
   // Build the proposed new row.
+  const startDate = b.date ?? a.date;
+  let nextEnd = t === 'event' ? ('end_date' in b ? b.end_date : a.end_date) : null;
+  if (nextEnd) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextEnd) || nextEnd < startDate)
+      return res.status(400).json({ error: 'End date must be a valid date on or after the start date' });
+    if (nextEnd === startDate) nextEnd = null;   // collapse to single-day
+  }
   const next = {
     type: t,
     title: b.title ?? a.title,
     kid_id: 'kid_id' in b ? b.kid_id : a.kid_id,
-    date: b.date ?? a.date,
+    date: startDate,
+    end_date: nextEnd,
     time: t === 'birthday' ? null : ('time' in b ? b.time : a.time),
     notes: 'notes' in b ? b.notes : a.notes,
     parent_id: t === 'birthday' ? null : ('parent_id' in b ? b.parent_id : a.parent_id)
@@ -437,8 +464,8 @@ app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
     db.prepare("UPDATE proposals SET status='cancelled', responded_at=? WHERE appointment_id=? AND status='pending'")
       .run(now(), a.id);
   }
-  db.prepare(`UPDATE appointments SET type=?, title=?, kid_id=?, date=?, time=?, notes=?, parent_id=?, confirmed=? WHERE id=?`)
-    .run(next.type, next.title, next.kid_id, next.date, next.time, next.notes, next.parent_id,
+  db.prepare(`UPDATE appointments SET type=?, title=?, kid_id=?, date=?, end_date=?, time=?, notes=?, parent_id=?, confirmed=? WHERE id=?`)
+    .run(next.type, next.title, next.kid_id, next.date, next.end_date, next.time, next.notes, next.parent_id,
          nowTheirs ? a.confirmed : 1, a.id);
 
   if (materiallyChanged) {
@@ -526,8 +553,8 @@ app.post('/api/proposals/:id/respond', auth, parentOnly, (req, res) => {
     } else if (a) {
       const n = p.payload ? JSON.parse(p.payload) : null;
       if (n) {
-        db.prepare(`UPDATE appointments SET type=?, title=?, kid_id=?, date=?, time=?, notes=?, parent_id=?, confirmed=1 WHERE id=?`)
-          .run(n.type ?? a.type, n.title, n.kid_id, n.date, n.time, n.notes, n.parent_id, a.id);
+        db.prepare(`UPDATE appointments SET type=?, title=?, kid_id=?, date=?, end_date=?, time=?, notes=?, parent_id=?, confirmed=1 WHERE id=?`)
+          .run(n.type ?? a.type, n.title, n.kid_id, n.date, n.end_date ?? null, n.time, n.notes, n.parent_id, a.id);
       } else {
         // 'assign' proposals carry no payload — the row is already correct, just unconfirmed.
         db.prepare('UPDATE appointments SET confirmed=1 WHERE id=?').run(a.id);
