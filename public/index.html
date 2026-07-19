@@ -126,6 +126,19 @@ header.app{
 .spanbar.s-start{ margin-left:0; border-top-left-radius:6px; border-bottom-left-radius:6px }
 .spanbar.s-end{ margin-right:0; border-top-right-radius:6px; border-bottom-right-radius:6px }
 .spanbar.pending{ opacity:.75; background-image:repeating-linear-gradient(45deg,rgba(0,0,0,.12) 0 4px,transparent 4px 8px) }
+/* On-call bars: outlined, tinted — reads as "background status", not a hard commitment.
+   Text uses the parent's color via inline `color`; dashed border reinforces "soft" status. */
+.oncallbar{
+  font-size:11px; font-weight:700; padding:1px 6px; height:17px; line-height:14px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  margin-left:-6px; margin-right:-6px; border-radius:0;
+  background:rgba(0,0,0,.045);
+  border-top:1.5px dashed; border-bottom:1.5px dashed;
+}
+.oncallbar.s-start{ margin-left:0; border-left:1.5px dashed; border-top-left-radius:5px; border-bottom-left-radius:5px }
+.oncallbar.s-end{ margin-right:0; border-right:1.5px dashed; border-top-right-radius:5px; border-bottom-right-radius:5px }
+.appt.oncall{ background:#FAFBF8; border-left:3px dashed #9AA093 }
+.oncall-own{ background:#fff !important; border:1.5px dashed; font-weight:700 }
 .day.pendingswap{box-shadow:inset 0 0 0 2px #C0702A}
 .swaptag{position:absolute; bottom:5px; right:6px; font-size:10px; font-weight:700;
   background:#C0702A; color:#fff; border-radius:5px; padding:1px 5px}

@@ -151,6 +151,7 @@ function renderApp(preserve){
     <span><i style="background:#9AA093"></i>unassigned</span>
     <span><i style="background:#fff;border:2px dashed var(--ink)"></i>swapped day</span>
     <span>🎂 birthday</span>
+    <span>📟 on call</span>
   </div>
   <div class="cal-wrap">
     <div class="dow">${DOWS.map(d=>`<div>${d}</div>`).join('')}</div>
@@ -187,9 +188,11 @@ function renderGrid(){
     const dow=new Date(y,m,d).getDay();
     const c=custodyFor(ds), cp=c.pid?parent(c.pid):null;
     const all=itemsOn(ds);
-    // Multi-day events render as a connecting bar; everything else as normal chips.
+    // Multi-day EVENTS render as a solid connecting bar; ON-CALL periods as a distinct
+    // outlined bar (awareness, not a hard commitment); everything else as normal chips.
     const spans=all.filter(a=>a.type==='event'&&a.end_date);
-    const appts=all.filter(a=>!(a.type==='event'&&a.end_date));
+    const oncalls=all.filter(a=>a.type==='oncall');
+    const appts=all.filter(a=>!(a.type==='event'&&a.end_date)&&a.type!=='oncall');
     const shown=appts.slice(0,2);
     const spanBars=spans.map(a=>{
       const isStart=a.date===ds, isEnd=a.end_date===ds, weekStart=dow===0;
@@ -200,11 +203,21 @@ function renderGrid(){
       return `<span class="spanbar ${isStart?'s-start':''} ${isEnd?'s-end':''} ${unsettled?'pending':''}"
         style="background:${bg}">${label}</span>`;
     }).join('');
+    const oncallBars=oncalls.map(a=>{
+      const start=a.date, end=a.end_date||a.date;
+      const isStart=start===ds, isEnd=end===ds, weekStart=dow===0;
+      const col=a.parent_id?parent(a.parent_id).color:'#9AA093';
+      const nm=a.parent_id?parent(a.parent_id).name:'';
+      const label=(isStart||weekStart)?`📟 ${esc(nm)} on call`:'&nbsp;';
+      return `<span class="oncallbar ${isStart?'s-start':''} ${isEnd?'s-end':''}"
+        style="color:${col};border-color:${col}">${label}</span>`;
+    }).join('');
     html+=`
     <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
       <span class="num">${d}</span>
       ${cp?`<span class="who ${c.override?'override':''}" style="background:${cp.color}">${esc(cp.name[0])}</span>`:''}
       ${c.pendingSwap?`<span class="swaptag">swap?</span>`:''}
+      ${oncallBars}
       ${spanBars}
       ${shown.map(a=>{
         if(a.type==='birthday')
@@ -289,6 +302,7 @@ function openDay(ds){
       <select id="a-type">
         <option value="appointment">Appointment</option>
         <option value="event">Event</option>
+        <option value="oncall">On-call period</option>
         <option value="birthday">Birthday (repeats every year)</option>
       </select>
     </div>
@@ -324,20 +338,31 @@ function openDay(ds){
 
   const syncType=()=>{
     const t=$('#a-type').value;
-    $('#f-time').style.display   = t==='birthday'?'none':'';
+    const isOncall=t==='oncall';
+    $('#f-time').style.display   = (t==='birthday'||isOncall)?'none':'';
     $('#f-parent').style.display = t==='birthday'?'none':'';
     $('#f-bdate').style.display  = t==='birthday'?'':'none';
-    $('#f-enddate').style.display = t==='event'?'':'none';   // multi-day is events only
-    $('#a-title').placeholder = t==='birthday'?"e.g. Ava's birthday":t==='event'?'e.g. Out of town':'e.g. Dentist';
-    if(t!=='event') $('#a-enddate').value='';
+    $('#f-enddate').style.display = (t==='event'||isOncall)?'':'none';   // multi-day: events + on-call
+    // On-call is about the parent, not a kid — hide the kid picker for it.
+    const kidField=$('#a-kid').closest('.field'); if(kidField) kidField.style.display=isOncall?'none':'';
+    // The "who" picker means different things per type.
+    const parentLabel=$('#f-parent').querySelector('label');
+    if(parentLabel) parentLabel.textContent = isOncall ? "Who's on call" : "Who's taking them";
+    $('#a-title').placeholder = t==='birthday'?"e.g. Ava's birthday":isOncall?'e.g. Work on-call':t==='event'?'e.g. Out of town':'e.g. Dentist';
+    if(t!=='event'&&!isOncall) $('#a-enddate').value='';
+    // On-call always defaults to yourself; you can't put the other parent on call.
+    if(isOncall){ $('#a-parent').value=D.me; }
     syncOwner();
   };
   // Assigning the other parent turns this into a request that needs their OK.
+  // On-call is awareness-only, so it never needs approval even if it's the other parent's.
   const syncOwner=()=>{
     const t=$('#a-type').value;
-    const needsOk = t!=='birthday' && +$('#a-parent').value===o.id;
+    const needsOk = t!=='birthday' && t!=='oncall' && +$('#a-parent').value===o.id;
     $('#f-msg').style.display = needsOk?'':'none';
-    $('#a-hint').textContent = needsOk
+    $('#a-hint').textContent = t==='oncall'
+      ? `Just so ${o.name} knows you might get pulled away. No approval needed — it's informational.`
+      : needsOk
       ? `${o.name} has to accept this before it's on her. It'll show as pending until she does.`
       : '';
     $('#a-save').textContent = needsOk ? (editingId?`Send change to ${o.name}`:`Ask ${o.name} to take it`)
@@ -380,12 +405,13 @@ function openDay(ds){
 
   $('#a-save').onclick=async()=>{
     const t=$('#a-type').value;
-    // For an edited event, its real start is the stored date (ds may be a middle day of the span).
+    const spanType = (t==='event'||t==='oncall');
+    // For an edited span (event/on-call), its real start is the stored date (ds may be a middle day).
     const editItem = editingId ? D.appointments.find(x=>x.id===editingId) : null;
     const startDate = t==='birthday' ? $('#a-bdate').value
-                    : (editItem && t==='event' ? editItem.date : ds);
-    const endVal = (t==='event' && $('#a-enddate').value) ? $('#a-enddate').value : null;
-    const body={ type:t, title:$('#a-title').value.trim(), kid_id:+$('#a-kid').value||null,
+                    : (editItem && spanType ? editItem.date : ds);
+    const endVal = (spanType && $('#a-enddate').value) ? $('#a-enddate').value : null;
+    const body={ type:t, title:$('#a-title').value.trim(), kid_id:t==='oncall'?null:(+$('#a-kid').value||null),
                  date: startDate,
                  end_date: endVal,
                  time:$('#a-time').value||null, notes:$('#a-notes').value.trim()||null,
@@ -459,6 +485,22 @@ function apptCard(a, ds){
       <div class="top"><b>&#127874; ${esc(a.title)}</b>${age?`<span>turning ${age}</span>`:''}</div>
       <div class="meta">${kid?esc(kid.name)+' &middot; ':''}repeats every year${a.notes?' &middot; '+esc(a.notes):''}</div>
       <div class="actions">${baseActions}</div>
+    </div>`;
+  }
+
+  if(a.type==='oncall'){
+    const oc=a.parent_id?parent(a.parent_id):null;
+    const range=a.end_date?`${fmtDate(a.date)} &rarr; ${fmtDate(a.end_date)}`:fmtDate(a.date);
+    // Only the parent whose on-call it is can edit/remove it.
+    const mineToEdit = !readOnly && a.parent_id===D.me;
+    const ocActions = mineToEdit
+      ? `<button class="btn small" data-act="edit" data-id="${a.id}">Edit</button>
+         <button class="btn small danger" data-act="del" data-id="${a.id}">Remove</button>` : '';
+    return `<div class="appt oncall">
+      <div class="top"><b>&#128223; ${esc(a.title)}</b></div>
+      <div class="meta">${range}${a.notes?' &middot; '+esc(a.notes):''}</div>
+      <span class="own oncall-own" style="border-color:${oc?oc.color:'#9AA093'}; color:${oc?oc.color:'#6B7265'}">${oc?esc(oc.name)+' on call':'On call'}</span>
+      ${ocActions?`<div class="actions">${ocActions}</div>`:''}
     </div>`;
   }
 
@@ -685,7 +727,7 @@ function drawExpenses(){
   const settleLabel = bal>0 ? `Record a payment from ${esc(o.name)}` : `Record a payment to ${esc(o.name)}`;
 
   sheet.innerHTML = `
-  <header><h2 class="display">Shared expenses <span class="ver-tag">v5 · partial pay</span></h2><button class="x" aria-label="Close">✕</button></header>
+  <header><h2 class="display">Shared expenses <span class="ver-tag">v6 · on-call</span></h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
     <div class="balbox ${bal===0?'even':bal>0?'pos':'neg'}">${banner}
       ${canSettle?`<button class="btn small" id="e-settle" style="margin-top:12px">${settleLabel}</button>`:''}
