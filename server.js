@@ -95,16 +95,52 @@ CREATE TABLE IF NOT EXISTS settlements (
 );
 `);
 
-// An earlier version created `settlements` without these columns. CREATE TABLE IF NOT EXISTS
-// won't add them to a table that already exists, so patch them in here (nullable-safe).
+// The live `settlements` table went through several earlier shapes (a NOT NULL `by_parent`
+// column, missing from_parent/to_parent, etc.). CREATE TABLE IF NOT EXISTS can't reshape an
+// existing table, so if the columns don't match the canonical set, rebuild it once —
+// preserving existing rows and mapping any legacy `by_parent` onto `from_parent`.
 const settleCols = db.prepare("PRAGMA table_info(settlements)").all();
 if (settleCols.length) {
-  const have = new Set(settleCols.map(c => c.name));
-  if (!have.has('from_parent'))  db.exec("ALTER TABLE settlements ADD COLUMN from_parent INTEGER");
-  if (!have.has('to_parent'))    db.exec("ALTER TABLE settlements ADD COLUMN to_parent INTEGER");
-  if (!have.has('amount_cents')) db.exec("ALTER TABLE settlements ADD COLUMN amount_cents INTEGER");
-  if (!have.has('note'))         db.exec("ALTER TABLE settlements ADD COLUMN note TEXT");
-  if (!have.has('created_at'))   db.exec("ALTER TABLE settlements ADD COLUMN created_at TEXT");
+  const names = settleCols.map(c => c.name);
+  const canonical = ['id', 'from_parent', 'to_parent', 'amount_cents', 'note', 'created_at'];
+  const hasAllCanonical = canonical.every(c => names.includes(c));
+  const hasOrphans = names.some(n => !canonical.includes(n));
+  if (!hasAllCanonical || hasOrphans) {
+    const has = n => names.includes(n);
+    // Best-effort source expressions for each target column from whatever exists now.
+    const fromExpr   = has('from_parent') ? 'from_parent' : (has('by_parent') ? 'by_parent' : 'NULL');
+    const toExpr     = has('to_parent') ? 'to_parent' : 'NULL';
+    const amtExpr    = has('amount_cents') ? 'amount_cents' : (has('amount') ? 'amount' : '0');
+    const noteExpr   = has('note') ? 'note' : 'NULL';
+    const createdExpr= has('created_at') ? 'created_at' : "''";
+    db.exec('BEGIN');
+    try {
+      db.exec(`
+        ALTER TABLE settlements RENAME TO settlements_legacy;
+        CREATE TABLE settlements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          from_parent  INTEGER NOT NULL,
+          to_parent    INTEGER NOT NULL,
+          amount_cents INTEGER NOT NULL,
+          note         TEXT,
+          created_at   TEXT NOT NULL
+        );
+        INSERT INTO settlements (id, from_parent, to_parent, amount_cents, note, created_at)
+          SELECT id,
+                 COALESCE(${fromExpr}, 0),
+                 COALESCE(${toExpr}, 0),
+                 COALESCE(${amtExpr}, 0),
+                 ${noteExpr},
+                 COALESCE(NULLIF(${createdExpr}, ''), '1970-01-01T00:00:00.000Z')
+          FROM settlements_legacy;
+        DROP TABLE settlements_legacy;
+      `);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+  }
 }
 
 // Migrate databases created by the earlier weekday-pattern version.
