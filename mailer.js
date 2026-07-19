@@ -206,4 +206,70 @@ function itemDeleted({ to, actor, item }) {
   ));
 }
 
-module.exports = { enabled, approvalNeeded, proposalAnswered, itemAdded, itemDeleted };
+// ---- Expenses (shared-cost splitting) ----
+const money = cents => `$${(Math.abs(cents) / 100).toFixed(2)}`;
+
+// Someone logged an expense involving you.
+function expenseLogged({ to, actor, type, item, kid, share_cents }) {
+  const A = esc(actor);
+  const isReq = type === 'request';
+  const subject = isReq
+    ? `${actor} is asking to split: ${item.description} (${money(share_cents)})`
+    : `${actor} logged a shared cost: ${item.description} (you owe ${money(share_cents)})`;
+  const heading = isReq
+    ? `${A} is asking you to split a cost`
+    : `${A} logged a shared cost`;
+  const rows = [
+    ['What', esc(item.description)],
+    ['Total', money(item.amount_cents)],
+    ['Your share', `${money(share_cents)}${item.split_pct !== 50 ? ` (${item.split_pct}%)` : ''}`],
+    kid && ['Kid', esc(kid)],
+    ['When', esc(fmtDate(item.date))],
+    ['Right now', isReq
+      ? "It won't count until you accept the split. You can accept or decline."
+      : "It's counted as owed. If it looks wrong, you can dispute it."]
+  ];
+  send(to, subject, shell(heading, isReq ? '#C0702A' : '#2F6D62', rows,
+    isReq ? 'Accept or decline' : 'Open expenses'));
+}
+
+// The other parent answered your request, or disputed your necessity.
+function expenseAnswered({ to, actor, action, next, item, share_cents }) {
+  const A = esc(actor);
+  const map = {
+    accept:  [`${actor} accepted the split: ${item.description}`, `${A} accepted the split`,
+              `${A} owes you ${money(share_cents)}. It's in the running balance.`, '#2F6D62'],
+    decline: [`${actor} declined the split: ${item.description}`, `${A} declined the split`,
+              "It's off the tally \u2014 nothing is owed on it.", '#A33B2E'],
+    dispute: [`${actor} disputed: ${item.description}`, `${A} disputed this cost`,
+              "It's on hold and out of the balance until you resolve it \u2014 withdraw it or put it back.", '#C0702A'],
+  };
+  const [subject, heading, result, accent] = map[action] || map.decline;
+  send(to, subject, shell(heading, accent, [
+    ['What', esc(item.description)],
+    ['Total', money(item.amount_cents)],
+    ['Share', money(share_cents)],
+    ['Result', result]
+  ], 'Open expenses'));
+}
+
+// A settle-up cleared the running balance.
+function expenseSettled({ to, actor, net_cents, count, note }) {
+  const A = esc(actor);
+  const dir = net_cents === 0 ? 'Everything was even.'
+    : net_cents > 0 ? `${A} marked that you paid them ${money(net_cents)}.`
+    : `${A} marked that they paid you ${money(net_cents)}.`;
+  send(to, `${actor} settled up the shared expenses`, shell(
+    `${A} settled up`, '#2F6D62',
+    [
+      ['Cleared', `${count} expense${count === 1 ? '' : 's'}`],
+      ['Balance', dir],
+      note && ['Note', `\u201C${esc(note)}\u201D`],
+      ['Now', 'The running balance is back to zero.']
+    ],
+    'Open expenses'
+  ));
+}
+
+module.exports = { enabled, approvalNeeded, proposalAnswered, itemAdded, itemDeleted,
+                   expenseLogged, expenseAnswered, expenseSettled };

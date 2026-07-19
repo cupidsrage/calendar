@@ -68,6 +68,30 @@ CREATE TABLE IF NOT EXISTS proposals (
   created_at TEXT NOT NULL,
   responded_at TEXT
 );
+CREATE TABLE IF NOT EXISTS expenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_by   INTEGER NOT NULL,          -- parent who logged/paid it
+  owed_by      INTEGER NOT NULL,          -- the OTHER parent (who owes their share)
+  amount_cents INTEGER NOT NULL,          -- total cost, in cents (never floats)
+  split_pct    INTEGER NOT NULL DEFAULT 50, -- owed_by's share, 0..100 (50 = even)
+  description  TEXT NOT NULL,
+  category     TEXT,                      -- medical | school | clothing | activities | other
+  kid_id       INTEGER,                   -- optional tag
+  date         TEXT NOT NULL,             -- YYYY-MM-DD the cost was incurred
+  type         TEXT NOT NULL,             -- necessity | request
+  -- necessity starts 'owed' (auto-owed, disputable); request starts 'pending'.
+  status       TEXT NOT NULL,             -- pending | owed | declined | disputed | settled
+  settle_id    INTEGER,                   -- groups rows zeroed out in one settle-up
+  created_at   TEXT NOT NULL,
+  responded_at TEXT
+);
+CREATE TABLE IF NOT EXISTS settlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  by_parent    INTEGER NOT NULL,
+  net_cents    INTEGER NOT NULL,          -- signed net that was cleared (from by_parent's view)
+  note         TEXT,
+  created_at   TEXT NOT NULL
+);
 `);
 
 // Migrate databases created by the earlier weekday-pattern version.
@@ -584,6 +608,159 @@ app.post('/api/proposals/:id/cancel', auth, parentOnly, (req, res) => {
   if (p.kind === 'assign' && p.appointment_id)
     db.prepare('UPDATE appointments SET parent_id=NULL, confirmed=1 WHERE id=? AND confirmed=0').run(p.appointment_id);
   res.json({ ok: true });
+});
+
+// ---------- expenses (shared-cost splitting) ----------
+// Two flavors:
+//   necessity — a shared cost that's owed by default. Lands as 'owed'. The other
+//               parent can DISPUTE it (they can't silently decline a real bill).
+//   request   — "would you split this?" Lands as 'pending'; the other parent
+//               accepts (-> 'owed') or declines (-> 'declined'). Only counts if accepted.
+//
+// The tally nets everything with status='owed' and no settle_id: what the other
+// parent owes you minus what you owe them, as one signed number. Settling stamps
+// every currently-owed row with a settle_id so it drops out of the running balance.
+const EXP_CATS = ['medical', 'school', 'clothing', 'activities', 'other'];
+
+// owed_by's share of one expense, in cents (rounded to the nearest cent).
+const shareCents = e => Math.round(e.amount_cents * e.split_pct / 100);
+
+// Net balance between the two parents, from `viewer`'s perspective, in cents.
+// Positive => the other parent owes viewer; negative => viewer owes them.
+function balanceFor(viewer) {
+  const rows = db.prepare(
+    "SELECT * FROM expenses WHERE status='owed' AND settle_id IS NULL"
+  ).all();
+  let net = 0;
+  for (const e of rows) {
+    const share = shareCents(e);
+    // created_by paid; owed_by owes `share`. If viewer is the one owed, +; if viewer owes, -.
+    if (e.created_by === viewer) net += share;       // they owe you their share
+    else if (e.owed_by === viewer) net -= share;     // you owe them your share
+  }
+  return net;
+}
+
+app.get('/api/expenses', auth, parentOnly, (req, res) => {
+  const rows = db.prepare('SELECT * FROM expenses ORDER BY date DESC, id DESC').all();
+  res.json({
+    me: req.parentId,
+    expenses: rows,
+    balance_cents: balanceFor(req.parentId),
+    settlements: db.prepare('SELECT * FROM settlements ORDER BY id DESC LIMIT 20').all()
+  });
+});
+
+app.post('/api/expenses', auth, parentOnly, (req, res) => {
+  const { amount_cents, split_pct, description, category, kid_id, date, type } = req.body || {};
+  const cents = Math.round(Number(amount_cents));
+  if (!Number.isFinite(cents) || cents <= 0)
+    return res.status(400).json({ error: 'Enter an amount greater than zero' });
+  if (!description || !description.trim())
+    return res.status(400).json({ error: 'Add a short description' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || ''))
+    return res.status(400).json({ error: 'A date is required' });
+  if (type !== 'necessity' && type !== 'request')
+    return res.status(400).json({ error: 'Pick necessity or request' });
+  let pct = split_pct == null ? 50 : Math.round(Number(split_pct));
+  if (!Number.isFinite(pct) || pct < 0 || pct > 100)
+    return res.status(400).json({ error: 'Split must be between 0 and 100%' });
+  const other = otherParent(req.parentId);
+  if (!other) return res.status(400).json({ error: 'No other parent configured' });
+  const cat = EXP_CATS.includes(category) ? category : 'other';
+  const status = type === 'necessity' ? 'owed' : 'pending';
+
+  const r = db.prepare(`INSERT INTO expenses
+    (created_by, owed_by, amount_cents, split_pct, description, category, kid_id, date, type, status, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(req.parentId, other, cents, pct, description.trim(), cat, kid_id || null, date, type, status, now());
+
+  const addr = mailTo(other);
+  if (addr) mail.expenseLogged({
+    to: addr, actor: pName(req.parentId), type,
+    item: { description: description.trim(), amount_cents: cents, split_pct: pct, date, category: cat },
+    kid: kidName(kid_id), share_cents: Math.round(cents * pct / 100)
+  });
+
+  res.json({ id: r.lastInsertRowid, status });
+});
+
+// The owed_by parent responds to a REQUEST (accept/decline) or disputes a NECESSITY.
+app.post('/api/expenses/:id/respond', auth, parentOnly, (req, res) => {
+  const e = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'Not found' });
+  if (e.owed_by !== req.parentId)
+    return res.status(403).json({ error: "This isn't yours to answer" });
+  const action = req.body?.action; // accept | decline | dispute
+  let next;
+  if (e.type === 'request' && e.status === 'pending') {
+    if (action === 'accept') next = 'owed';
+    else if (action === 'decline') next = 'declined';
+    else return res.status(400).json({ error: 'Accept or decline this request' });
+  } else if (e.type === 'necessity' && e.status === 'owed') {
+    if (action === 'dispute') next = 'disputed';
+    else return res.status(400).json({ error: 'A necessity can only be disputed' });
+  } else {
+    return res.status(400).json({ error: 'This can no longer be changed' });
+  }
+  db.prepare('UPDATE expenses SET status=?, responded_at=? WHERE id=?').run(next, now(), e.id);
+
+  const addr = mailTo(e.created_by);
+  if (addr) mail.expenseAnswered({
+    to: addr, actor: pName(req.parentId), action, next,
+    item: e, share_cents: shareCents(e)
+  });
+  res.json({ ok: true, status: next });
+});
+
+// Creator resolves a disputed necessity: withdraw it, or re-assert it back to owed.
+app.post('/api/expenses/:id/resolve', auth, parentOnly, (req, res) => {
+  const e = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'Not found' });
+  if (e.created_by !== req.parentId)
+    return res.status(403).json({ error: 'Only the person who logged it can resolve a dispute' });
+  if (e.status !== 'disputed') return res.status(400).json({ error: 'This isn\u2019t disputed' });
+  const action = req.body?.action; // withdraw | reassert
+  if (action === 'withdraw') {
+    db.prepare("UPDATE expenses SET status='declined', responded_at=? WHERE id=?").run(now(), e.id);
+  } else if (action === 'reassert') {
+    db.prepare("UPDATE expenses SET status='owed', responded_at=? WHERE id=?").run(now(), e.id);
+  } else {
+    return res.status(400).json({ error: 'Withdraw it or put it back' });
+  }
+  res.json({ ok: true });
+});
+
+// Edit / delete an expense you logged (only while it hasn't been settled).
+app.delete('/api/expenses/:id', auth, parentOnly, (req, res) => {
+  const e = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'Not found' });
+  if (e.created_by !== req.parentId)
+    return res.status(403).json({ error: 'Only the person who logged it can remove it' });
+  if (e.settle_id) return res.status(400).json({ error: 'This was already settled up' });
+  db.prepare('DELETE FROM expenses WHERE id = ?').run(e.id);
+  res.json({ ok: true });
+});
+
+// Settle up: everything currently 'owed' (and unsettled) gets stamped and drops
+// out of the running balance. This is the "your $60 and her $60 cancel to $0" moment.
+app.post('/api/expenses/settle', auth, parentOnly, (req, res) => {
+  const net = balanceFor(req.parentId); // signed, from this parent's view
+  const owed = db.prepare("SELECT id FROM expenses WHERE status='owed' AND settle_id IS NULL").all();
+  if (!owed.length) return res.status(400).json({ error: 'Nothing to settle up' });
+  const s = db.prepare('INSERT INTO settlements (by_parent, net_cents, note, created_at) VALUES (?,?,?,?)')
+    .run(req.parentId, net, (req.body?.note || '').trim() || null, now());
+  const sid = s.lastInsertRowid;
+  const stamp = db.prepare("UPDATE expenses SET status='settled', settle_id=? WHERE id=?");
+  const tx = db.transaction(ids => ids.forEach(row => stamp.run(sid, row.id)));
+  tx(owed);
+
+  const addr = mailTo(otherParent(req.parentId));
+  if (addr) mail.expenseSettled({
+    to: addr, actor: pName(req.parentId), net_cents: net, count: owed.length,
+    note: (req.body?.note || '').trim() || null
+  });
+  res.json({ ok: true, cleared: owed.length, net_cents: net });
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
