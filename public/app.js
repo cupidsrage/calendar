@@ -123,6 +123,27 @@ function renderLogin(parents, kidLogins){
 }
 
 /* ============ main app ============ */
+// Change month by delta (-1 prev, +1 next), then refresh + redraw. Shared by the
+// nav arrows and the swipe gesture so they behave identically. `dir` optionally
+// animates the grid sliding out in that direction first.
+let monthBusy = false;
+async function goMonth(delta, dir){
+  if(monthBusy) return;
+  monthBusy = true;
+  const inner = $('#gridinner');
+  if(dir && inner){
+    // brief slide-out in the swipe direction for tactile feedback
+    inner.style.transition = 'transform .13s ease-in, opacity .13s ease-in';
+    inner.style.transform = `translateX(${dir<0?'-':''}22%)`;
+    inner.style.opacity = '0';
+    await new Promise(r=>setTimeout(r,120));
+  }
+  view.setMonth(view.getMonth()+delta);
+  try{ await refresh(); }catch(e){}
+  renderApp();
+  monthBusy = false;
+}
+
 function renderApp(preserve){
   const isKid = D.role === 'kid';
   const wasOpen = preserve && document.querySelector('.sheet.open')?.id;
@@ -164,8 +185,8 @@ function renderApp(preserve){
   <div class="sheet" id="setsheet"></div>`;
 
   renderGrid();
-  $('#prev').onclick=()=>{ view.setMonth(view.getMonth()-1); refresh().then(()=>renderApp()); };
-  $('#next').onclick=()=>{ view.setMonth(view.getMonth()+1); refresh().then(()=>renderApp()); };
+  $('#prev').onclick=()=>goMonth(-1);
+  $('#next').onclick=()=>goMonth(1);
   $('#today').onclick=()=>{ view=new Date(); view.setDate(1); refresh().then(()=>renderApp()); };
   if($('#inbox')) $('#inbox').onclick=()=>openInbox();
   if($('#expenses')) $('#expenses').onclick=()=>openExpenses();
@@ -197,6 +218,7 @@ function setupGridZoom(){
   let startDist=0, startScale=1, startMid=null, startXY=null;
   let panStart=null;                 // one-finger pan when already zoomed
   let lastTap=0;
+  let swipe=null;                    // one-finger horizontal swipe when NOT zoomed
 
   const dist=(t)=>Math.hypot(t[0].clientX-t[1].clientX, t[0].clientY-t[1].clientY);
   const mid=(t)=>({ x:(t[0].clientX+t[1].clientX)/2, y:(t[0].clientY+t[1].clientY)/2 });
@@ -215,6 +237,10 @@ function setupGridZoom(){
     } else if(e.touches.length===1 && gridZoom.scale>1.01){
       // Pan the zoomed grid with one finger.
       panStart={ x:e.touches[0].clientX-gridZoom.x, y:e.touches[0].clientY-gridZoom.y };
+    } else if(e.touches.length===1){
+      // Not zoomed: a one-finger drag might be a month swipe. Record the origin;
+      // we only commit to it in touchmove once it's clearly horizontal.
+      swipe={ x0:e.touches[0].clientX, y0:e.touches[0].clientY, dx:0, dy:0, horizontal:false };
     }
   }, { passive:false });
 
@@ -236,6 +262,25 @@ function setupGridZoom(){
       constrainPan(view, inner);
       applyGridZoom(inner);
       e.preventDefault();
+    } else if(e.touches.length===1 && swipe){
+      swipe.dx = e.touches[0].clientX - swipe.x0;
+      swipe.dy = e.touches[0].clientY - swipe.y0;
+      // Lock to horizontal once the finger has clearly moved sideways more than
+      // down. If it's a vertical drag, let the page scroll and drop the swipe.
+      if(!swipe.horizontal){
+        if(Math.abs(swipe.dx) > 12 && Math.abs(swipe.dx) > Math.abs(swipe.dy)*1.4){
+          swipe.horizontal = true;
+        } else if(Math.abs(swipe.dy) > 12){
+          swipe = null; return;      // it's a vertical scroll, not a swipe
+        }
+      }
+      if(swipe.horizontal){
+        // Follow the finger a little so the swipe feels responsive.
+        const follow = Math.max(-60, Math.min(60, swipe.dx*0.4));
+        inner.style.transition = 'none';
+        inner.style.transform = `translateX(${follow}px)`;
+        e.preventDefault();
+      }
     }
   }, { passive:false });
 
@@ -243,6 +288,16 @@ function setupGridZoom(){
     if(e.touches.length<2){ startDist=0; view.classList.remove('zooming'); }
     if(e.touches.length===0){
       panStart=null;
+      // Resolve a horizontal swipe (only meaningful when not zoomed).
+      if(swipe && swipe.horizontal && gridZoom.scale<=1.01){
+        const THRESH = Math.min(90, view.clientWidth*0.22);   // ~1/5 screen
+        if(swipe.dx <= -THRESH){ swipe=null; goMonth(1, 1); return; }   // swipe left → next
+        if(swipe.dx >=  THRESH){ swipe=null; goMonth(-1, -1); return; } // swipe right → prev
+        // Didn't reach the threshold — snap the grid back to center.
+        inner.style.transition = 'transform .16s ease-out';
+        inner.style.transform = 'translateX(0)';
+      }
+      swipe=null;
       // Double-tap to reset to fit.
       const nowT=Date.now();
       if(nowT-lastTap<300 && gridZoom.scale>1.01){
@@ -819,7 +874,7 @@ function drawExpenses(){
   const settleLabel = bal>0 ? `Record a payment from ${esc(o.name)}` : `Record a payment to ${esc(o.name)}`;
 
   sheet.innerHTML = `
-  <header><h2 class="display">Shared expenses <span class="ver-tag">v7 · fit+zoom</span></h2><button class="x" aria-label="Close">✕</button></header>
+  <header><h2 class="display">Shared expenses <span class="ver-tag">v8 · swipe</span></h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
     <div class="balbox ${bal===0?'even':bal>0?'pos':'neg'}">${banner}
       ${canSettle?`<button class="btn small" id="e-settle" style="margin-top:12px">${settleLabel}</button>`:''}

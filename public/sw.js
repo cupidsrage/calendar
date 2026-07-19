@@ -1,5 +1,5 @@
 // Bump this whenever the shell files change — it forces a refresh on both phones.
-const VERSION = 'v7';
+const VERSION = 'v8';
 const SHELL = `shell-${VERSION}`;
 
 // The app shell: the files needed to draw the UI. Data is NEVER cached.
