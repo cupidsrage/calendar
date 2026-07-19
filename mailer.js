@@ -76,7 +76,7 @@ async function send(to, subject, html, attempt = 1) {
   }
 }
 
-const LABEL = { appointment: 'appointment', event: 'event', birthday: 'birthday' };
+const LABEL = { appointment: 'appointment', event: 'event', birthday: 'birthday', oncall: 'on-call period' };
 const KIND_NOUN = {
   swap_day: 'day swap',
   assign: 'appointment',
@@ -177,18 +177,27 @@ function proposalAnswered({ to, actor, kind, accepted, item, date, newOwner }) {
 // ---- FYI only: something was added/changed that doesn't need your approval. ----
 function itemAdded({ to, actor, item, kid, owner, edited }) {
   const verb = edited ? 'updated' : 'added';
-  const subject = `${actor} ${verb}: ${item.title}`;
+  const isOncall = item.type === 'oncall';
+  const subject = isOncall
+    ? `${actor} ${verb} an on-call period: ${item.title}`
+    : `${actor} ${verb}: ${item.title}`;
+  const whenText = isOncall
+    ? (item.end_date ? `${fmtDate(item.date)} \u2013 ${fmtDate(item.end_date)}` : fmtDate(item.date))
+    : (item.type === 'birthday' ? `${fmtDate(item.date)} \u2014 repeats yearly` : when(item));
   send(to, subject, shell(
     `${esc(actor)} ${verb} ${item.type === 'birthday' ? 'a birthday' : `an ${LABEL[item.type] || 'item'}`}`,
-    '#2F6D62',
+    isOncall ? '#4A5FA5' : '#2F6D62',
     [
       ['What', esc(item.title)],
-      ['When', esc(item.type === 'birthday' ? `${fmtDate(item.date)} \u2014 repeats yearly` : when(item))],
+      ['When', esc(whenText)],
       kid && ['Kid', esc(kid)],
-      owner && ['Who', `${esc(owner)} is taking them`],
-      !owner && item.type !== 'birthday' && ['Who', 'Unassigned \u2014 nobody has claimed it'],
+      isOncall && owner && ['Who', `${esc(owner)} is on call`],
+      !isOncall && owner && ['Who', `${esc(owner)} is taking them`],
+      !owner && item.type !== 'birthday' && !isOncall && ['Who', 'Unassigned \u2014 nobody has claimed it'],
       item.notes && ['Notes', esc(item.notes)],
-      ['Heads up', 'No approval needed \u2014 this is just so you know.']
+      ['Heads up', isOncall
+        ? 'Just so you know they may get pulled away \u2014 no approval needed.'
+        : 'No approval needed \u2014 this is just so you know.']
     ],
     'Open the calendar'
   ));

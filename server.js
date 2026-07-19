@@ -376,7 +376,7 @@ app.delete('/api/kids/:id', auth, parentOnly, (req, res) => {
 // ---------- proposals ----------
 // Anything that puts an obligation on the other parent is a PROPOSAL: it only
 // takes effect once they accept. Anything that only affects yourself is immediate.
-const ITEM_TYPES = ['appointment', 'event', 'birthday'];
+const ITEM_TYPES = ['appointment', 'event', 'birthday', 'oncall'];
 const EDIT_FIELDS = ['title', 'kid_id', 'date', 'end_date', 'time', 'notes', 'parent_id'];
 
 function propose({ kind, from, to, appointment_id = null, date = null, to_parent_on_date = null, payload = null, message = null }) {
@@ -392,9 +392,9 @@ app.post('/api/appointments', auth, parentOnly, (req, res) => {
   if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(date || ''))
     return res.status(400).json({ error: 'Title and date are required' });
   const t = ITEM_TYPES.includes(type) ? type : 'appointment';
-  // Multi-day range is events-only. end >= start; store only genuine ranges.
+  // Multi-day range applies to events and on-call periods. end >= start; store only genuine ranges.
   let endD = null;
-  if (t === 'event' && end_date) {
+  if ((t === 'event' || t === 'oncall') && end_date) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(end_date))
       return res.status(400).json({ error: 'End date is invalid' });
     if (end_date < date)
@@ -402,11 +402,15 @@ app.post('/api/appointments', auth, parentOnly, (req, res) => {
     if (end_date !== date) endD = end_date;
   }
   const other = otherParent(req.parentId);
-  // Birthdays have no owner; events may be unassigned; appointments default to the creator.
-  const pid = t === 'birthday' ? null : (t === 'event' ? (parent_id || null) : (parent_id || req.parentId));
+  // Birthdays have no owner; events may be unassigned; on-call is always the creator's own;
+  // appointments default to the creator.
+  const pid = t === 'birthday' ? null
+            : t === 'oncall' ? req.parentId
+            : (t === 'event' ? (parent_id || null) : (parent_id || req.parentId));
 
   // Assigning the OTHER parent needs their approval — the item lands unconfirmed.
-  const needsApproval = !!pid && pid === other;
+  // On-call is awareness-only (you're flagging your own availability), so it never needs approval.
+  const needsApproval = t !== 'oncall' && !!pid && pid === other;
 
   const r = db.prepare(`INSERT INTO appointments (type, title, kid_id, date, end_date, time, notes, parent_id, confirmed, created_by, created_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
@@ -442,7 +446,7 @@ app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
 
   // Build the proposed new row.
   const startDate = b.date ?? a.date;
-  let nextEnd = t === 'event' ? ('end_date' in b ? b.end_date : a.end_date) : null;
+  let nextEnd = (t === 'event' || t === 'oncall') ? ('end_date' in b ? b.end_date : a.end_date) : null;
   if (nextEnd) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(nextEnd) || nextEnd < startDate)
       return res.status(400).json({ error: 'End date must be a valid date on or after the start date' });
@@ -456,16 +460,16 @@ app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
     end_date: nextEnd,
     time: t === 'birthday' ? null : ('time' in b ? b.time : a.time),
     notes: 'notes' in b ? b.notes : a.notes,
+    // On-call stays owned by whoever it belongs to; birthdays have no owner.
     parent_id: t === 'birthday' ? null : ('parent_id' in b ? b.parent_id : a.parent_id)
   };
 
   // Does this edit change something the OTHER parent is on the hook for?
+  // On-call is never an obligation on the other parent, so it never triggers approval.
   const wasTheirs = a.parent_id === other;
   const nowTheirs = next.parent_id === other;
   const materiallyChanged = EDIT_FIELDS.some(f => (next[f] ?? null) !== (a[f] ?? null));
-  // Their approval is needed if they're being put on it, or if a commitment they
-  // already agreed to is being changed in any way.
-  const needsApproval = nowTheirs && materiallyChanged && !(wasTheirs && !a.confirmed);
+  const needsApproval = t !== 'oncall' && nowTheirs && materiallyChanged && !(wasTheirs && !a.confirmed);
 
   if (needsApproval) {
     // Cancel any older pending proposal on this item, then propose the edit.
