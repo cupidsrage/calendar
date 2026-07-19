@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS settlements (
 );
 `);
 
+// An earlier version created `settlements` without these columns. CREATE TABLE IF NOT EXISTS
+// won't add them to a table that already exists, so patch them in here (nullable-safe).
+const settleCols = db.prepare("PRAGMA table_info(settlements)").all();
+if (settleCols.length) {
+  const have = new Set(settleCols.map(c => c.name));
+  if (!have.has('from_parent'))  db.exec("ALTER TABLE settlements ADD COLUMN from_parent INTEGER");
+  if (!have.has('to_parent'))    db.exec("ALTER TABLE settlements ADD COLUMN to_parent INTEGER");
+  if (!have.has('amount_cents')) db.exec("ALTER TABLE settlements ADD COLUMN amount_cents INTEGER");
+  if (!have.has('note'))         db.exec("ALTER TABLE settlements ADD COLUMN note TEXT");
+  if (!have.has('created_at'))   db.exec("ALTER TABLE settlements ADD COLUMN created_at TEXT");
+}
+
 // Migrate databases created by the earlier weekday-pattern version.
 const parentCols = db.prepare("PRAGMA table_info(parents)").all();
 if (parentCols.length && !parentCols.some(c => c.name === 'email')) {
