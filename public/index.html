@@ -117,6 +117,15 @@ header.app{
 .chip .t{opacity:.85; font-weight:500}
 .chip.pending{outline:2px dashed rgba(0,0,0,.4); outline-offset:-2px; opacity:.75}
 .chip.bday{background:#fff; color:var(--ink); border:1px solid var(--line)}
+/* Multi-day event bars: connect across cells by squaring the inner edges. */
+.spanbar{
+  font-size:11px; font-weight:600; color:#fff; padding:2px 6px; height:18px; line-height:14px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  margin-left:-6px; margin-right:-6px; border-radius:0;   /* bleed to cell edges = continuous look */
+}
+.spanbar.s-start{ margin-left:0; border-top-left-radius:6px; border-bottom-left-radius:6px }
+.spanbar.s-end{ margin-right:0; border-top-right-radius:6px; border-bottom-right-radius:6px }
+.spanbar.pending{ opacity:.75; background-image:repeating-linear-gradient(45deg,rgba(0,0,0,.12) 0 4px,transparent 4px 8px) }
 .day.pendingswap{box-shadow:inset 0 0 0 2px #C0702A}
 .swaptag{position:absolute; bottom:5px; right:6px; font-size:10px; font-weight:700;
   background:#C0702A; color:#fff; border-radius:5px; padding:1px 5px}
@@ -467,7 +476,9 @@ function custodyFor(ds){
 function itemsOn(ds){
   return D.appointments.filter(a => {
     if(!a || !a.date) return false;                 // skip corrupt rows instead of crashing
-    return a.type==='birthday' ? a.date.slice(5)===ds.slice(5) : a.date===ds;
+    if(a.type==='birthday') return a.date.slice(5)===ds.slice(5);
+    if(a.end_date) return a.date<=ds && ds<=a.end_date;   // multi-day event spans the day
+    return a.date===ds;
   });
 }
 function bdayAge(a, ds){

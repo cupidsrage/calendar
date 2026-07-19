@@ -181,14 +181,28 @@ function renderGrid(){
   for(let i=0;i<first;i++) html+=`<div class="day blank"></div>`;
   for(let d=1;d<=days;d++){
     const ds=`${y}-${pad(m+1)}-${pad(d)}`;
+    const dow=new Date(y,m,d).getDay();
     const c=custodyFor(ds), cp=c.pid?parent(c.pid):null;
-    const appts=itemsOn(ds);
-    const shown=appts.slice(0,3);
+    const all=itemsOn(ds);
+    // Multi-day events render as a connecting bar; everything else as normal chips.
+    const spans=all.filter(a=>a.type==='event'&&a.end_date);
+    const appts=all.filter(a=>!(a.type==='event'&&a.end_date));
+    const shown=appts.slice(0,2);
+    const spanBars=spans.map(a=>{
+      const isStart=a.date===ds, isEnd=a.end_date===ds, weekStart=dow===0;
+      const bg=a.parent_id?parent(a.parent_id).color:'#9AA093';
+      const unsettled=!a.confirmed||!!pendingFor(a.id);
+      // Show the label on the event's first day, or the first cell of each week row.
+      const label=(isStart||weekStart)?`${unsettled?'⏳ ':''}${esc(a.title)}`:'&nbsp;';
+      return `<span class="spanbar ${isStart?'s-start':''} ${isEnd?'s-end':''} ${unsettled?'pending':''}"
+        style="background:${bg}">${label}</span>`;
+    }).join('');
     html+=`
     <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
       <span class="num">${d}</span>
       ${cp?`<span class="who ${c.override?'override':''}" style="background:${cp.color}">${esc(cp.name[0])}</span>`:''}
       ${c.pendingSwap?`<span class="swaptag">swap?</span>`:''}
+      ${spanBars}
       ${shown.map(a=>{
         if(a.type==='birthday')
           return `<span class="chip bday">🎂 ${esc(a.title)}</span>`;
@@ -197,7 +211,7 @@ function renderGrid(){
         return `<span class="chip ${unsettled?'pending':''}" style="background:${bg}">
           ${unsettled?'⏳ ':''}${a.time?`<span class="t">${fmtTime(a.time)}</span>`:''}${esc(a.title)}</span>`;
       }).join('')}
-      ${appts.length>3?`<span class="more">+${appts.length-3} more</span>`:''}
+      ${appts.length>2?`<span class="more">+${appts.length-2} more</span>`:''}
     </button>`;
   }
   $('#grid').innerHTML=html;
@@ -282,6 +296,8 @@ function openDay(ds){
     <div class="field" id="f-bdate" style="display:none"><label>Birth date (year included, so we can show their age)</label>
       <input id="a-bdate" type="date"></div>
     <div class="field" id="f-time"><label>Time</label><input id="a-time" type="time"></div>
+    <div class="field" id="f-enddate" style="display:none"><label>End date <span class="empty">(leave blank for a single day)</span></label>
+      <input id="a-enddate" type="date"></div>
     <div class="field" id="f-parent"><label>Who's taking them</label>
       <select id="a-parent">
         <option value="">Nobody yet / both</option>
@@ -308,7 +324,9 @@ function openDay(ds){
     $('#f-time').style.display   = t==='birthday'?'none':'';
     $('#f-parent').style.display = t==='birthday'?'none':'';
     $('#f-bdate').style.display  = t==='birthday'?'':'none';
-    $('#a-title').placeholder = t==='birthday'?"e.g. Ava's birthday":t==='event'?'e.g. School play':'e.g. Dentist';
+    $('#f-enddate').style.display = t==='event'?'':'none';   // multi-day is events only
+    $('#a-title').placeholder = t==='birthday'?"e.g. Ava's birthday":t==='event'?'e.g. Out of town':'e.g. Dentist';
+    if(t!=='event') $('#a-enddate').value='';
     syncOwner();
   };
   // Assigning the other parent turns this into a request that needs their OK.
@@ -331,6 +349,7 @@ function openDay(ds){
     if(a){ $('#a-type').value=a.type||'appointment';
            $('#a-title').value=a.title; $('#a-kid').value=a.kid_id||''; $('#a-time').value=a.time||'';
            $('#a-parent').value=a.parent_id||''; $('#a-notes').value=a.notes||''; $('#a-bdate').value=a.date;
+           $('#a-enddate').value=a.end_date||'';
            syncType(); }
     $('#a-cancel').onclick=()=>{ editingId=null; openDay(ds); };
   }
@@ -358,13 +377,20 @@ function openDay(ds){
 
   $('#a-save').onclick=async()=>{
     const t=$('#a-type').value;
+    // For an edited event, its real start is the stored date (ds may be a middle day of the span).
+    const editItem = editingId ? D.appointments.find(x=>x.id===editingId) : null;
+    const startDate = t==='birthday' ? $('#a-bdate').value
+                    : (editItem && t==='event' ? editItem.date : ds);
+    const endVal = (t==='event' && $('#a-enddate').value) ? $('#a-enddate').value : null;
     const body={ type:t, title:$('#a-title').value.trim(), kid_id:+$('#a-kid').value||null,
-                 date: t==='birthday' ? $('#a-bdate').value : ds,
+                 date: startDate,
+                 end_date: endVal,
                  time:$('#a-time').value||null, notes:$('#a-notes').value.trim()||null,
                  parent_id:+$('#a-parent').value||null,
                  message:$('#a-msg').value.trim()||null };
     if(!body.title){ $('#a-err').textContent='Give it a title.'; return; }
     if(t==='birthday'&&!body.date){ $('#a-err').textContent='Pick the birth date.'; return; }
+    if(endVal && endVal<startDate){ $('#a-err').textContent='The end date is before the start date.'; return; }
     try{
       let r;
       if(editingId) r = await api('/api/appointments/'+editingId,{method:'PUT',body});
@@ -448,9 +474,10 @@ function apptCard(a, ds){
   let banner='', actions=baseActions;
   if(readOnly){
     // Kids: show the ownership state, but no action buttons at all.
+    const range=a.end_date?`${fmtDate(a.date)} &rarr; ${fmtDate(a.end_date)}`:'';
     return `<div class="appt ${p?'ispending':''}">
       <div class="top"><b>${esc(a.title)}</b>${a.time?`<span>${fmtTime(a.time)}</span>`:''}</div>
-      <div class="meta">${a.type==='event'?'Event &middot; ':''}${kid?esc(kid.name)+' &middot; ':''}${a.notes?esc(a.notes):''}</div>
+      <div class="meta">${a.type==='event'?'Event &middot; ':''}${range?range+' &middot; ':''}${kid?esc(kid.name)+' &middot; ':''}${a.notes?esc(a.notes):''}</div>
       ${ownLine}
     </div>`;
   }
@@ -478,7 +505,7 @@ function apptCard(a, ds){
 
   return `<div class="appt ${p?'ispending':''}">
     <div class="top"><b>${esc(a.title)}</b>${a.time?`<span>${fmtTime(a.time)}</span>`:''}</div>
-    <div class="meta">${a.type==='event'?'Event &middot; ':''}${kid?esc(kid.name)+' &middot; ':''}${a.notes?esc(a.notes):''}</div>
+    <div class="meta">${a.type==='event'?'Event &middot; ':''}${a.end_date?`${fmtDate(a.date)} &rarr; ${fmtDate(a.end_date)} &middot; `:''}${kid?esc(kid.name)+' &middot; ':''}${a.notes?esc(a.notes):''}</div>
     ${ownLine}${banner}<div class="actions">${actions}</div>
   </div>`;
 }
