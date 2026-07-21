@@ -373,7 +373,11 @@ header.app{
             padding:8px 8px calc(6px + env(safe-area-inset-bottom)); max-width:none}
   .dow{flex:0 0 auto; gap:4px; margin-bottom:4px}
   .grid-view{flex:1 1 auto; min-height:0}
-  .grid{height:100%; grid-auto-rows:1fr; gap:4px}
+  /* Give the inner zoom layer a real height so the grid's 100% can resolve.
+     minmax(0,1fr) prevents badges or event text from making a row taller than
+     its share and pushing the last week below the clipped phone viewport. */
+  .grid-inner{height:100%; min-height:0}
+  .grid{height:100%; grid-auto-rows:minmax(0,1fr); gap:4px}
   /* Cells now stretch to fill their row instead of using a fixed min-height. */
   .day{min-height:0; padding:4px; overflow:hidden}
   .day .who{position:static; align-self:flex-end; order:-1}
