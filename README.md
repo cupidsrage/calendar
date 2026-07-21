@@ -16,7 +16,7 @@ A shared custody calendar for two parents. Week-on/week-off schedule, appointmen
 - **Email notifications** — you get an email when the other parent adds something, asks you to cover, answers your request, or switches a custody day. Each parent can turn theirs off in settings.
 - **Auto-sync** — polls every 25 seconds, so you both see changes without refreshing.
 - **Seasonal themes** — automatic Spring, Summer, Autumn, and Winter palettes, plus manual choices and the original look. Each device remembers its own preference.
-- **Live Cabot weather** — current conditions and temperature for Cabot, Arkansas appear in the header, while today's calendar square reflects sunshine, clouds, fog, rain, snow, or storms. Weather is cached and never blocks the calendar.
+- **Live Cabot weather** — current conditions and temperature for Cabot, Arkansas appear in the header. A 10-day forecast adds an icon, high/low temperatures, and matching sunshine, cloud, fog, rain, snow, or storm effects to each forecast day's calendar square. Weather is cached and never blocks the calendar.
 
 ## Deploy to Railway
 1. Push this folder to a GitHub repo (or `railway up` from the CLI).
@@ -106,3 +106,4 @@ Once installed it opens fullscreen with its own icon and no browser bar. It refr
 **Offline:** the app shell is cached, so it opens without a connection and shows a red "You're offline" bar. Calendar data is never cached (a stale custody day is worse than none), and any change you try to make while offline tells you it didn't save rather than pretending it did.
 
 **Notifications** are email-only (see Email setup above). Android web push is unreliable when the browser is closed, so email is the dependable channel for "she needs to approve this."
+

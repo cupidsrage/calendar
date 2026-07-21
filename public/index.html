@@ -378,8 +378,9 @@ header.app{
   .day{min-height:0; padding:4px; overflow:hidden}
   .day .who{position:static; align-self:flex-end; order:-1}
   .weather-now{padding:4px 7px; min-width:68px}
-  .weather-cell-badge{left:3px; bottom:3px; padding:0 3px; line-height:14px}
-  .weather-cell-badge .weather-temp{display:none}
+  .weather-cell-badge{left:3px; bottom:3px; gap:1px; padding:0 2px; font-size:8px; line-height:14px}
+  .weather-cell-badge>span:first-child{font-size:10px}
+  .weather-cell-badge .weather-temp{font-size:7.5px; letter-spacing:-.04em}
   .chip .t{display:none}
   .monthnav .month{min-width:0; font-size:16px}
   .legend{padding:6px 10px 0}
@@ -718,3 +719,4 @@ function tint(hex, a){
 <script src="/app.js"></script>
 </body>
 </html>
+

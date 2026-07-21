@@ -267,7 +267,7 @@ app.use('/api', (req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- current weather (Cabot, Arkansas) ----------
+// ---------- current weather + 10-day forecast (Cabot, Arkansas) ----------
 // Open-Meteo needs no API key. Keep the coordinates fixed so both parents see
 // the same local conditions, and cache upstream responses to avoid noisy polling.
 const CABOT_WEATHER = {
@@ -324,11 +324,12 @@ async function getCabotWeather() {
     latitude: String(CABOT_WEATHER.latitude),
     longitude: String(CABOT_WEATHER.longitude),
     current: 'temperature_2m,apparent_temperature,weather_code,precipitation,rain,showers,snowfall,cloud_cover,is_day,wind_speed_10m',
+    daily: 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max',
     temperature_unit: 'fahrenheit',
     wind_speed_unit: 'mph',
     precipitation_unit: 'inch',
     timezone: CABOT_WEATHER.timezone,
-    forecast_days: '1'
+    forecast_days: '10'
   });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
@@ -345,6 +346,26 @@ async function getCabotWeather() {
       throw new Error('Open-Meteo response was missing current conditions');
 
     const condition = weatherCondition(current.weather_code);
+    const daily = payload.daily;
+    const forecast = Array.isArray(daily?.time) ? daily.time.map((date, index) => {
+      const code = daily.weather_code?.[index];
+      const high = daily.temperature_2m_max?.[index];
+      const low = daily.temperature_2m_min?.[index];
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !Number.isFinite(code)
+          || !Number.isFinite(high) || !Number.isFinite(low)) return null;
+      const dailyCondition = weatherCondition(code);
+      return {
+        date,
+        weather_code: code,
+        condition: dailyCondition,
+        description: weatherDescription(code),
+        icon: weatherIcon(dailyCondition, true),
+        high_f: Math.round(high),
+        low_f: Math.round(low),
+        precipitation_probability: Number.isFinite(daily.precipitation_probability_max?.[index])
+          ? Math.round(daily.precipitation_probability_max[index]) : null
+      };
+    }).filter(Boolean) : [];
     const result = {
       location: CABOT_WEATHER.location,
       observed_at: current.time,
@@ -361,6 +382,7 @@ async function getCabotWeather() {
       snowfall_in: current.snowfall,
       cloud_cover: current.cloud_cover,
       wind_mph: current.wind_speed_10m,
+      forecast,
       stale: false,
       source: 'Open-Meteo'
     };
@@ -958,3 +980,4 @@ app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Co-parent calendar running on :${PORT}, data in ${DATA_DIR}`));
+

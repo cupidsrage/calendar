@@ -18,6 +18,38 @@ function currentWeather(){
   };
 }
 
+function forecastWeather(){
+  if (!Array.isArray(WEATHER?.forecast)) return [];
+  const allowed = ['clear','partly-cloudy','cloudy','fog','rain','snow','storm'];
+  return WEATHER.forecast.filter(day =>
+    /^\d{4}-\d{2}-\d{2}$/.test(day?.date || '') &&
+    Number.isFinite(day?.high_f) && Number.isFinite(day?.low_f)
+  ).map(day => ({
+    ...day,
+    condition: allowed.includes(day.condition) ? day.condition : 'cloudy',
+    description: typeof day.description === 'string' ? day.description : 'Forecast conditions',
+    icon: typeof day.icon === 'string' ? day.icon : '☁️',
+    location: typeof WEATHER.location === 'string' ? WEATHER.location : 'Cabot, AR',
+    stale: !!WEATHER.stale
+  }));
+}
+
+function calendarWeather(ds){
+  const current = currentWeather();
+  const daily = forecastWeather().find(day => day.date === ds);
+  if (!daily) return current?.date === ds ? current : null;
+  // Today's animation follows what is actually happening now, while its badge
+  // keeps the useful daily high/low forecast.
+  if (current?.date === ds) return {
+    ...daily,
+    condition: current.condition,
+    description: current.description,
+    icon: current.icon,
+    current_temperature_f: current.temperature_f
+  };
+  return daily;
+}
+
 /* ============ boot / routing ============ */
 async function boot(){
   clearInterval(pollTimer);
@@ -360,7 +392,6 @@ function renderGrid(){
   const y=view.getFullYear(), m=view.getMonth();
   const first=new Date(y,m,1).getDay(), days=new Date(y,m+1,0).getDate();
   const tstr=todayStr();
-  const liveWeather=currentWeather();
   let html='';
   for(let i=0;i<first;i++) html+=`<div class="day blank"></div>`;
   for(let d=1;d<=days;d++){
@@ -368,7 +399,7 @@ function renderGrid(){
     const dow=new Date(y,m,d).getDay();
     const c=custodyFor(ds), cp=c.pid?parent(c.pid):null;
     const all=itemsOn(ds);
-    const weather = liveWeather && ds===liveWeather.date ? liveWeather : null;
+    const weather = calendarWeather(ds);
     // Multi-day EVENTS render as a solid connecting bar; ON-CALL periods as a distinct
     // outlined bar (awareness, not a hard commitment); everything else as normal chips.
     const spans=all.filter(a=>a.type==='event'&&a.end_date);
@@ -409,8 +440,8 @@ function renderGrid(){
           ${unsettled?'⏳ ':''}${a.time?`<span class="t">${fmtTime(a.time)}</span>`:''}${esc(a.title)}</span>`;
       }).join('')}
       ${appts.length>2?`<span class="more">+${appts.length-2} more</span>`:''}
-      ${weather?`<span class="weather-cell-badge" title="${esc(weather.description)} · ${weather.temperature_f}° in ${esc(weather.location)}" aria-label="${esc(weather.description)}, ${weather.temperature_f} degrees">
-        <span aria-hidden="true">${esc(weather.icon)}</span><span class="weather-temp">${weather.temperature_f}°</span>
+      ${weather?`<span class="weather-cell-badge" title="${esc(weather.description)}${Number.isFinite(weather.high_f)?` · High ${weather.high_f}° · Low ${weather.low_f}°`:Number.isFinite(weather.temperature_f)?` · ${weather.temperature_f}°`:''} in ${esc(weather.location)}" aria-label="${esc(weather.description)}${Number.isFinite(weather.high_f)?`, high ${weather.high_f} degrees, low ${weather.low_f} degrees`:Number.isFinite(weather.temperature_f)?`, ${weather.temperature_f} degrees`:''}">
+        <span aria-hidden="true">${esc(weather.icon)}</span><span class="weather-temp">${Number.isFinite(weather.high_f)?`${weather.high_f}°/${weather.low_f}°`:`${weather.temperature_f}°`}</span>
       </span>`:''}
     </button>`;
   }
@@ -1232,3 +1263,4 @@ function openSettings(){
 }
 
 boot().catch(e=>{ $('#app').innerHTML='<div class="gate"><div class="gate-card">Could not reach the server. Refresh to try again.</div></div>'; });
+
