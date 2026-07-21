@@ -14,18 +14,80 @@
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+/* Apply the saved palette before the page paints so installed PWAs do not flash
+   the default colors. Automatic mode follows Northern Hemisphere seasons. */
+const CALENDAR_THEMES = {
+  classic: { label:'Original', icon:'◻', themeColor:'#21281F', description:'The familiar neutral palette' },
+  spring:  { label:'Spring',   icon:'🌷', themeColor:'#466B43', description:'Blossom pink and fresh greens' },
+  summer:  { label:'Summer',   icon:'☀️', themeColor:'#27657A', description:'Sunny gold and clear sky blue' },
+  autumn:  { label:'Autumn',   icon:'🍂', themeColor:'#71402A', description:'Warm leaves and harvest tones' },
+  winter:  { label:'Winter',   icon:'❄️', themeColor:'#294B63', description:'Frosted blue and evergreen' }
+};
+const THEME_CHOICES = ['auto','spring','summer','autumn','winter','classic'];
+
+function seasonalTheme(date = new Date()) {
+  const month = date.getMonth();
+  if (month >= 2 && month <= 4) return 'spring';
+  if (month >= 5 && month <= 7) return 'summer';
+  if (month >= 8 && month <= 10) return 'autumn';
+  return 'winter';
+}
+function savedThemeChoice() {
+  try {
+    const saved = localStorage.getItem('cc_theme') || 'auto';
+    return THEME_CHOICES.includes(saved) ? saved : 'auto';
+  } catch (_) { return 'auto'; }
+}
+function applyTheme(choice = savedThemeChoice(), persist = false) {
+  const selected = THEME_CHOICES.includes(choice) ? choice : 'auto';
+  const active = selected === 'auto' ? seasonalTheme() : selected;
+  document.documentElement.dataset.theme = active;
+  document.documentElement.dataset.themeChoice = selected;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = CALENDAR_THEMES[active].themeColor;
+  if (persist) {
+    try { localStorage.setItem('cc_theme', selected); } catch (_) {}
+  }
+  return active;
+}
+applyTheme();
+</script>
 <style>
 :root{
   --paper:#F6F7F4; --card:#FFFFFF; --ink:#21281F; --muted:#6B7265;
   --line:#E1E4DC; --danger:#A33B2E;
   --p1:#2F6D62; --p2:#C0702A; /* replaced at runtime by parent colors */
+  --input:#FFFFFF; --glow:#E9EEE3; --accent:#5E7C3A;
+  --page-pattern:radial-gradient(circle at 12% 6%, var(--glow) 0, transparent 30%);
   --radius:10px;
+}
+html[data-theme="spring"]{
+  --paper:#F4F8EE; --card:#FFFEFA; --ink:#293A28; --muted:#657361;
+  --line:#D7E3CF; --danger:#A6424A; --input:#FFFFFF; --glow:#DCEFCB; --accent:#A85D8E;
+  --page-pattern:radial-gradient(circle at 8% 4%, #F6DDEB 0, transparent 24%), radial-gradient(circle at 94% 12%, #DCEFCB 0, transparent 30%);
+}
+html[data-theme="summer"]{
+  --paper:#F3F8F6; --card:#FFFEF8; --ink:#173D49; --muted:#5E7378;
+  --line:#CFE1DF; --danger:#B3483D; --input:#FFFFFF; --glow:#D6EFF0; --accent:#E4A82E;
+  --page-pattern:radial-gradient(circle at 88% 3%, #FFF0B8 0, transparent 25%), radial-gradient(circle at 4% 28%, #D6EFF0 0, transparent 28%);
+}
+html[data-theme="autumn"]{
+  --paper:#F8F3EA; --card:#FFFDF8; --ink:#4C3022; --muted:#76685C;
+  --line:#E5D7C5; --danger:#A43E32; --input:#FFFFFF; --glow:#F0D5AF; --accent:#B96332;
+  --page-pattern:radial-gradient(circle at 92% 4%, #F0D5AF 0, transparent 27%), radial-gradient(circle at 3% 32%, #E7C7B4 0, transparent 24%);
+}
+html[data-theme="winter"]{
+  --paper:#EEF4F8; --card:#FBFDFF; --ink:#1E3544; --muted:#637783;
+  --line:#CEDCE5; --danger:#A33B46; --input:#FFFFFF; --glow:#D8E9F4; --accent:#527E92;
+  --page-pattern:radial-gradient(circle at 92% 6%, #FFFFFF 0, transparent 28%), radial-gradient(circle at 5% 30%, #D8E9F4 0, transparent 31%);
 }
 *{box-sizing:border-box; margin:0; padding:0}
 html,body{height:100%}
 body{
-  font-family:'Public Sans',system-ui,sans-serif; background:var(--paper); color:var(--ink);
-  font-size:15px; line-height:1.45;
+  font-family:'Public Sans',system-ui,sans-serif; background-color:var(--paper); color:var(--ink);
+  background-image:var(--page-pattern); background-attachment:fixed;
+  font-size:15px; line-height:1.45; transition:background-color .25s ease,color .2s ease;
 }
 button{font:inherit; cursor:pointer}
 input,select,textarea{font:inherit; color:var(--ink)}
@@ -47,7 +109,7 @@ input,select,textarea{font:inherit; color:var(--ink)}
 .field{display:flex; flex-direction:column; gap:4px; margin-bottom:12px}
 .field label{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted)}
 .field input,.field select,.field textarea{
-  border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:#fff;
+  border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--input);
 }
 .err{color:var(--danger); font-size:13px; min-height:18px; margin-top:6px}
 
@@ -65,7 +127,7 @@ input,select,textarea{font:inherit; color:var(--ink)}
 .swatch.sel{border-color:var(--ink)}
 .login-choice{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px}
 .login-parent{
-  border:1px solid var(--line); border-radius:10px; background:#fff; padding:18px 10px;
+  border:1px solid var(--line); border-radius:10px; background:var(--input); padding:18px 10px;
   display:flex; flex-direction:column; align-items:center; gap:8px; font-weight:700;
 }
 .login-parent .dot{width:34px; height:34px; border-radius:50%}
@@ -81,7 +143,8 @@ header.app{
 .brand .who{font-size:12px; font-weight:600; color:var(--muted)}
 .monthnav{display:flex; align-items:center; gap:8px}
 .monthnav .month{font-size:20px; font-weight:700; min-width:190px; text-align:center}
-.iconbtn{position:relative; border:1px solid var(--line); background:#fff; border-radius:8px; padding:6px 10px; font-size:15px}
+.iconbtn{position:relative; border:1px solid var(--line); background:var(--input); color:var(--ink); border-radius:8px; padding:6px 10px; font-size:15px}
+.season-mark{font-size:18px; line-height:1; filter:saturate(.85); transform:translateY(-1px)}
 .badge{
   position:absolute; top:-6px; right:-6px; background:var(--danger); color:#fff;
   font-size:11px; font-weight:700; border-radius:999px; min-width:18px; height:18px;
@@ -122,7 +185,7 @@ header.app{
 }
 .chip .t{opacity:.85; font-weight:500}
 .chip.pending{outline:2px dashed rgba(0,0,0,.4); outline-offset:-2px; opacity:.75}
-.chip.bday{background:#fff; color:var(--ink); border:1px solid var(--line)}
+.chip.bday{background:var(--input); color:var(--ink); border:1px solid var(--line)}
 /* Multi-day event bars: connect across cells by squaring the inner edges. */
 .spanbar{
   font-size:11px; font-weight:600; color:#fff; padding:2px 6px; height:18px; line-height:14px;
@@ -154,7 +217,7 @@ header.app{
 .pendbox.tight{margin:8px 0 0; padding:9px 10px}
 .pendhead{font-weight:700; font-size:14px; color:#6A4A18; margin-bottom:4px}
 .pendbody{font-size:13.5px; color:#6A4A18}
-.pendmsg{font-size:13.5px; background:#fff; border-radius:7px; padding:7px 9px; margin-top:6px; color:var(--ink)}
+.pendmsg{font-size:13.5px; background:var(--input); border-radius:7px; padding:7px 9px; margin-top:6px; color:var(--ink)}
 .pendbox .actions{display:flex; gap:8px; margin-top:10px}
 .appt.ispending{border-color:#E8CFA8; background:#FFFDF9}
 .own.unsettled{background:#fff !important; border:1.5px dashed; font-weight:700}
@@ -216,6 +279,25 @@ header.app{
 .warn{background:#FDF3E7; border:1px solid #E8CFA8; color:#6A4A18; border-radius:8px;
   padding:10px 12px; font-size:13.5px; margin-bottom:14px}
 
+/* ---------- seasonal theme picker ---------- */
+.theme-grid{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:6px}
+.theme-choice{
+  border:1px solid var(--line); background:var(--input); color:var(--ink); border-radius:10px;
+  padding:10px; display:grid; grid-template-columns:34px 1fr; gap:9px; text-align:left; align-items:center;
+}
+.theme-choice:hover{border-color:var(--accent)}
+.theme-choice.sel{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent); background:var(--card)}
+.theme-swatch{width:34px; height:34px; border-radius:10px; display:grid; place-items:center; font-size:17px; border:1px solid rgba(0,0,0,.08)}
+.theme-copy{min-width:0; display:flex; flex-direction:column; gap:1px}
+.theme-copy b{font-size:13.5px}
+.theme-copy small{font-size:11px; color:var(--muted); line-height:1.25}
+.theme-choice[data-theme-option="auto"] .theme-swatch{background:conic-gradient(#DCEFCB,#FFF0B8,#F0D5AF,#D8E9F4,#DCEFCB)}
+.theme-choice[data-theme-option="spring"] .theme-swatch{background:linear-gradient(145deg,#F6DDEB,#DCEFCB)}
+.theme-choice[data-theme-option="summer"] .theme-swatch{background:linear-gradient(145deg,#FFF0B8,#D6EFF0)}
+.theme-choice[data-theme-option="autumn"] .theme-swatch{background:linear-gradient(145deg,#F0D5AF,#B96332)}
+.theme-choice[data-theme-option="winter"] .theme-swatch{background:linear-gradient(145deg,#FFFFFF,#D8E9F4)}
+.theme-choice[data-theme-option="classic"] .theme-swatch{background:linear-gradient(145deg,#FFFFFF,#E9EEE3)}
+
 .toast{
   position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--paper);
   padding:9px 16px; border-radius:8px; font-size:14px; z-index:80; opacity:0; transition:opacity .2s; pointer-events:none;
@@ -241,6 +323,7 @@ header.app{
   .chip .t{display:none}
   .monthnav .month{min-width:0; font-size:16px}
   .legend{padding:6px 10px 0}
+  .theme-grid{grid-template-columns:1fr}
 }
 @media(prefers-reduced-motion:reduce){ .sheet{transition:none} }
 
@@ -341,14 +424,14 @@ button, .day{ -webkit-tap-highlight-color:transparent; user-select:none }
 .balhead.you-owe{color:var(--danger)}
 .balsub{font-size:12.5px; color:var(--muted); margin-top:4px}
 .exp-toggle{display:flex; gap:8px; margin-bottom:8px}
-.exp-toggle .et{flex:1; border:1px solid var(--line); background:#fff; border-radius:10px; padding:10px; font-weight:700; cursor:pointer; display:flex; flex-direction:column; gap:2px; align-items:center}
+.exp-toggle .et{flex:1; border:1px solid var(--line); background:var(--input); color:var(--ink); border-radius:10px; padding:10px; font-weight:700; cursor:pointer; display:flex; flex-direction:column; gap:2px; align-items:center}
 .exp-toggle .et span{font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.05em}
 .exp-toggle .et.sel{border-color:var(--ink); background:var(--ink); color:var(--paper)}
 .exp-toggle .et.sel span{color:#cdd3c7}
 .exp-row{display:flex; gap:10px}
 .exp-row .field{flex:1}
 .split-preview{font-size:13px; color:var(--muted); margin:2px 0 12px; min-height:16px}
-.exp{border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:#fff}
+.exp{border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:var(--input)}
 .exp.needsme{border-color:#E8CFA8; background:#FDF3E7}
 .exp-top{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:15px}
 .exp-meta{font-size:12.5px; color:var(--muted); margin-top:3px}

@@ -1,6 +1,7 @@
 /* ============ boot / routing ============ */
 async function boot(){
   clearInterval(pollTimer);
+  applyTheme();
   setOnline();
   const state = await api('/api/state');
   if (state.needsSetup) return renderSetup();
@@ -147,6 +148,7 @@ async function goMonth(delta, dir){
 function renderApp(preserve){
   const isKid = D.role === 'kid';
   const wasOpen = preserve && document.querySelector('.sheet.open')?.id;
+  const activeTheme = document.documentElement.dataset.theme || seasonalTheme();
   document.documentElement.style.setProperty('--p1', D.parents[0]?.color || '#2F6D62');
   document.documentElement.style.setProperty('--p2', D.parents[1]?.color || '#C0702A');
   const inboxCount = isKid ? 0 : myInbox().length;
@@ -154,7 +156,7 @@ function renderApp(preserve){
 
   $('#app').innerHTML = `
   <header class="app">
-    <div class="brand display">Our Calendar <span class="who">signed in as ${esc(whoName)}${isKid?' · view only':''}</span></div>
+    <div class="brand display"><span class="season-mark" aria-hidden="true">${CALENDAR_THEMES[activeTheme].icon}</span>Our Calendar <span class="who">signed in as ${esc(whoName)}${isKid?' · view only':''}</span></div>
     <div class="monthnav">
       <button class="iconbtn" id="prev" aria-label="Previous month">‹</button>
       <div class="month display">${MONTHS[view.getMonth()]} ${view.getFullYear()}</div>
@@ -1064,12 +1066,32 @@ function expCard(e, box){
 }
 
 /* ---- settings ---- */
+function themePicker(){
+  const selected = document.documentElement.dataset.themeChoice || 'auto';
+  const currentSeason = CALENDAR_THEMES[seasonalTheme()].label;
+  return `<div class="theme-grid" role="group" aria-label="Calendar theme">
+    ${THEME_CHOICES.map(id=>{
+      const info = id === 'auto'
+        ? { label:'Automatic', icon:'✨', description:`Changes by season · ${currentSeason} now` }
+        : CALENDAR_THEMES[id];
+      return `<button class="theme-choice ${selected===id?'sel':''}" data-theme-option="${id}" aria-pressed="${selected===id}">
+        <span class="theme-swatch" aria-hidden="true">${info.icon}</span>
+        <span class="theme-copy"><b>${info.label}</b><small>${info.description}</small></span>
+      </button>`;
+    }).join('')}
+  </div>
+  <p class="empty" style="margin:4px 0 6px">Saved on this device. Automatic mode uses spring (Mar–May), summer (Jun–Aug), autumn (Sep–Nov), and winter (Dec–Feb).</p>`;
+}
+
 function openSettings(){
   const sheet=$('#setsheet');
   const mine=parent(D.me);
   sheet.innerHTML=`
-  <header><h2 class="display">Schedule & kids</h2><button class="x" aria-label="Close">✕</button></header>
+  <header><h2 class="display">Calendar settings</h2><button class="x" aria-label="Close">✕</button></header>
   <div class="body">
+    <div class="section-h">Seasonal theme</div>
+    ${themePicker()}
+
     <div class="section-h">Custody — week on / week off</div>
     <div class="field"><label>Exchange day (the day the kids switch houses)</label>
       <select id="sc-dow">${DOWS.map((d,i)=>`<option value="${i}">${d}</option>`).join('')}</select>
@@ -1099,6 +1121,20 @@ function openSettings(){
   </div>`;
   showSheet('#setsheet');
   sheet.querySelector('.x').onclick=closeSheets;
+  sheet.querySelectorAll('[data-theme-option]').forEach(button=>{
+    button.onclick=()=>{
+      const choice = button.dataset.themeOption;
+      const active = applyTheme(choice, true);
+      sheet.querySelectorAll('[data-theme-option]').forEach(option=>{
+        const selected = option.dataset.themeOption === choice;
+        option.classList.toggle('sel', selected);
+        option.setAttribute('aria-pressed', String(selected));
+      });
+      const mark = document.querySelector('.season-mark');
+      if(mark) mark.textContent = CALENDAR_THEMES[active].icon;
+      toast(choice === 'auto' ? `Automatic · ${CALENDAR_THEMES[active].label}` : `${CALENDAR_THEMES[active].label} theme`);
+    };
+  });
   // Preselect current schedule values if set
   if(D.schedule){
     $('#sc-dow').value = new Date(D.schedule.anchor_date+'T12:00:00').getDay();
