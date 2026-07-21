@@ -145,6 +145,15 @@ header.app{
 .monthnav .month{font-size:20px; font-weight:700; min-width:190px; text-align:center}
 .iconbtn{position:relative; border:1px solid var(--line); background:var(--input); color:var(--ink); border-radius:8px; padding:6px 10px; font-size:15px}
 .season-mark{font-size:18px; line-height:1; filter:saturate(.85); transform:translateY(-1px)}
+.weather-now{
+  margin-left:auto; display:flex; align-items:center; gap:6px; min-width:76px;
+  border:1px solid var(--line); border-radius:9px; background:var(--input); color:var(--ink);
+  padding:4px 8px; font-family:'Public Sans',system-ui,sans-serif; line-height:1.05;
+}
+.weather-icon{font-size:20px; line-height:1}
+.weather-copy{display:flex; flex-direction:column; gap:2px}
+.weather-copy b{font-size:13px; font-variant-numeric:tabular-nums}
+.weather-copy small{font-size:9px; color:var(--muted); font-weight:700; text-transform:uppercase; letter-spacing:.04em}
 .badge{
   position:absolute; top:-6px; right:-6px; background:var(--danger); color:#fff;
   font-size:11px; font-weight:700; border-radius:999px; min-width:18px; height:18px;
@@ -174,6 +183,54 @@ header.app{
 .day.blank{background:transparent; border-color:transparent; pointer-events:none}
 .day .num{font-weight:700; font-size:14px; font-variant-numeric:tabular-nums}
 .day.today .num{background:var(--ink); color:var(--paper); border-radius:6px; padding:0 6px; align-self:flex-start}
+.day.has-weather{overflow:hidden; isolation:isolate}
+.day.has-weather::before,.day.has-weather::after{
+  content:''; position:absolute; inset:0; z-index:1; pointer-events:none;
+}
+.day.has-weather>*{z-index:2}
+.day.weather-clear::before{
+  background:radial-gradient(circle at 78% 22%,rgba(255,199,65,.65) 0 9%,rgba(255,221,123,.28) 10% 24%,transparent 25%);
+}
+.day.weather-partly-cloudy::before{
+  background:radial-gradient(ellipse at 78% 28%,rgba(255,255,255,.82) 0 12%,transparent 13%),
+             radial-gradient(ellipse at 68% 34%,rgba(220,229,233,.72) 0 18%,transparent 19%),
+             radial-gradient(circle at 86% 16%,rgba(255,202,75,.48) 0 9%,transparent 10%);
+}
+.day.weather-cloudy::before{
+  background:radial-gradient(ellipse at 30% 28%,rgba(218,226,232,.62) 0 20%,transparent 21%),
+             radial-gradient(ellipse at 70% 45%,rgba(194,207,216,.52) 0 25%,transparent 26%);
+}
+.day.weather-fog::before{
+  background:repeating-linear-gradient(0deg,transparent 0 13px,rgba(255,255,255,.62) 14px 18px,transparent 19px 28px);
+  background-size:100% 70px; animation:weatherFog 5s ease-in-out infinite alternate;
+}
+.day.weather-rain::before,.day.weather-storm::before{
+  background-image:repeating-linear-gradient(112deg,transparent 0 9px,rgba(55,112,151,.35) 10px 11px,transparent 12px 20px);
+  background-size:24px 36px; animation:weatherRain .65s linear infinite;
+}
+.day.weather-rain::after{background:linear-gradient(rgba(92,133,158,.12),rgba(63,101,128,.20))}
+.day.weather-snow::before{
+  background-image:radial-gradient(circle,rgba(255,255,255,.94) 0 2px,transparent 2.5px),
+                   radial-gradient(circle,rgba(255,255,255,.78) 0 1.5px,transparent 2px);
+  background-size:20px 20px,29px 29px; background-position:0 0,10px 7px;
+  animation:weatherSnow 3.4s linear infinite;
+}
+.day.weather-snow::after{background:linear-gradient(rgba(221,238,248,.18),rgba(232,245,252,.56))}
+.day.weather-storm::after{
+  background:linear-gradient(rgba(46,58,75,.28),rgba(47,70,91,.38));
+  animation:weatherFlash 4.5s steps(1,end) infinite;
+}
+.weather-cell-badge{
+  position:absolute; left:6px; bottom:5px; display:inline-flex; align-items:center; gap:3px;
+  border:1px solid rgba(0,0,0,.08); border-radius:6px; background:rgba(255,255,255,.84);
+  color:#24323A; padding:1px 5px; font-size:10.5px; font-weight:800; line-height:16px;
+  box-shadow:0 1px 3px rgba(25,40,50,.12); backdrop-filter:blur(2px);
+}
+.weather-temp{font-variant-numeric:tabular-nums}
+@keyframes weatherRain{to{background-position:-24px 36px}}
+@keyframes weatherSnow{to{background-position:20px 60px,-19px 58px}}
+@keyframes weatherFog{to{background-position:0 12px; opacity:.68}}
+@keyframes weatherFlash{0%,90%,94%,100%{opacity:1}91%,93%{opacity:.26; background:#EAF5FF}}
 .day .who{
   position:absolute; top:6px; right:6px; font-size:11px; font-weight:700; color:#fff;
   border-radius:6px; padding:1px 6px;
@@ -320,12 +377,18 @@ header.app{
   /* Cells now stretch to fill their row instead of using a fixed min-height. */
   .day{min-height:0; padding:4px; overflow:hidden}
   .day .who{position:static; align-self:flex-end; order:-1}
+  .weather-now{padding:4px 7px; min-width:68px}
+  .weather-cell-badge{left:3px; bottom:3px; padding:0 3px; line-height:14px}
+  .weather-cell-badge .weather-temp{display:none}
   .chip .t{display:none}
   .monthnav .month{min-width:0; font-size:16px}
   .legend{padding:6px 10px 0}
   .theme-grid{grid-template-columns:1fr}
 }
-@media(prefers-reduced-motion:reduce){ .sheet{transition:none} }
+@media(prefers-reduced-motion:reduce){
+  .sheet{transition:none}
+  .day.has-weather::before,.day.has-weather::after{animation:none}
+}
 
 /* ---------- installed-app (PWA) behaviour ---------- */
 /* Respect the notch / status bar / gesture bar when running standalone. */
@@ -609,7 +672,12 @@ document.addEventListener('visibilitychange', () => {
 
 async function softRefresh(){
   if (!token || !D || !navigator.onLine) return;
-  try { await refresh(); renderApp(true); } catch(e) {}
+  try {
+    await refresh(); renderApp(true);
+    if(typeof refreshWeather==='function') refreshWeather().then(ok=>{
+      if(ok && !document.querySelector('.sheet.open')) renderApp(true);
+    });
+  } catch(e) {}
 }
 
 function custodyFor(ds){

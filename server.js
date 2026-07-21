@@ -267,6 +267,122 @@ app.use('/api', (req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ---------- current weather (Cabot, Arkansas) ----------
+// Open-Meteo needs no API key. Keep the coordinates fixed so both parents see
+// the same local conditions, and cache upstream responses to avoid noisy polling.
+const CABOT_WEATHER = {
+  latitude: 34.9745,
+  longitude: -92.0165,
+  location: 'Cabot, AR',
+  timezone: 'America/Chicago'
+};
+const WEATHER_CACHE_MS = 10 * 60 * 1000;
+let weatherCache = { fetchedAt: 0, data: null };
+
+function weatherCondition(code) {
+  if (code === 0) return 'clear';
+  if (code === 1 || code === 2) return 'partly-cloudy';
+  if (code === 3) return 'cloudy';
+  if (code === 45 || code === 48) return 'fog';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'snow';
+  if ([95, 96, 99].includes(code)) return 'storm';
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 'rain';
+  return 'cloudy';
+}
+
+function weatherDescription(code) {
+  const descriptions = {
+    0:'Clear sky', 1:'Mostly clear', 2:'Partly cloudy', 3:'Overcast',
+    45:'Fog', 48:'Freezing fog', 51:'Light drizzle', 53:'Drizzle', 55:'Heavy drizzle',
+    56:'Light freezing drizzle', 57:'Freezing drizzle', 61:'Light rain', 63:'Rain',
+    65:'Heavy rain', 66:'Light freezing rain', 67:'Freezing rain', 71:'Light snow',
+    73:'Snow', 75:'Heavy snow', 77:'Snow grains', 80:'Light rain showers',
+    81:'Rain showers', 82:'Heavy rain showers', 85:'Light snow showers',
+    86:'Heavy snow showers', 95:'Thunderstorms', 96:'Thunderstorms with hail',
+    99:'Severe thunderstorms with hail'
+  };
+  return descriptions[code] || 'Cloudy';
+}
+
+function weatherIcon(condition, isDay) {
+  if (condition === 'clear') return isDay ? '☀️' : '🌙';
+  if (condition === 'partly-cloudy') return isDay ? '🌤️' : '☁️';
+  if (condition === 'cloudy') return '☁️';
+  if (condition === 'fog') return '🌫️';
+  if (condition === 'rain') return '🌧️';
+  if (condition === 'snow') return '🌨️';
+  if (condition === 'storm') return '⛈️';
+  return '☁️';
+}
+
+async function getCabotWeather() {
+  const fetchedAt = Date.now();
+  if (weatherCache.data && fetchedAt - weatherCache.fetchedAt < WEATHER_CACHE_MS)
+    return weatherCache.data;
+
+  const params = new URLSearchParams({
+    latitude: String(CABOT_WEATHER.latitude),
+    longitude: String(CABOT_WEATHER.longitude),
+    current: 'temperature_2m,apparent_temperature,weather_code,precipitation,rain,showers,snowfall,cloud_cover,is_day,wind_speed_10m',
+    temperature_unit: 'fahrenheit',
+    wind_speed_unit: 'mph',
+    precipitation_unit: 'inch',
+    timezone: CABOT_WEATHER.timezone,
+    forecast_days: '1'
+  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'CoParentCalendar/1.0' }
+    });
+    if (!response.ok) throw new Error(`Open-Meteo returned ${response.status}`);
+    const payload = await response.json();
+    const current = payload.current;
+    if (!current || !Number.isFinite(current.weather_code) || !Number.isFinite(current.temperature_2m))
+      throw new Error('Open-Meteo response was missing current conditions');
+
+    const condition = weatherCondition(current.weather_code);
+    const result = {
+      location: CABOT_WEATHER.location,
+      observed_at: current.time,
+      date: current.time.slice(0, 10),
+      temperature_f: Math.round(current.temperature_2m),
+      apparent_temperature_f: Number.isFinite(current.apparent_temperature)
+        ? Math.round(current.apparent_temperature) : Math.round(current.temperature_2m),
+      weather_code: current.weather_code,
+      condition,
+      description: weatherDescription(current.weather_code),
+      icon: weatherIcon(condition, current.is_day === 1),
+      is_day: current.is_day === 1,
+      precipitation_in: current.precipitation,
+      snowfall_in: current.snowfall,
+      cloud_cover: current.cloud_cover,
+      wind_mph: current.wind_speed_10m,
+      stale: false,
+      source: 'Open-Meteo'
+    };
+    weatherCache = { fetchedAt, data: result };
+    return result;
+  } catch (error) {
+    if (weatherCache.data) return { ...weatherCache.data, stale: true };
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+app.get('/api/weather', auth, async (req, res) => {
+  try {
+    res.json(await getCabotWeather());
+  } catch (error) {
+    console.warn('[weather] Current conditions unavailable:', error.message);
+    res.status(503).json({ error: 'Current weather is temporarily unavailable' });
+  }
+});
+
 // ---------- setup & login ----------
 app.get('/api/state', (req, res) => {
   const parents = db.prepare('SELECT id, name, color FROM parents ORDER BY id').all();

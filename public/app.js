@@ -1,3 +1,23 @@
+let WEATHER = null;
+
+async function refreshWeather(){
+  try { WEATHER = await api('/api/weather'); return true; }
+  catch (_) { return false; }
+}
+
+function currentWeather(){
+  if (!WEATHER || !Number.isFinite(WEATHER.temperature_f)) return null;
+  const allowed = ['clear','partly-cloudy','cloudy','fog','rain','snow','storm'];
+  return {
+    ...WEATHER,
+    condition: allowed.includes(WEATHER.condition) ? WEATHER.condition : 'cloudy',
+    location: typeof WEATHER.location === 'string' ? WEATHER.location : 'Cabot, AR',
+    description: typeof WEATHER.description === 'string' ? WEATHER.description : 'Current conditions',
+    icon: typeof WEATHER.icon === 'string' ? WEATHER.icon : '☁️',
+    date: /^\d{4}-\d{2}-\d{2}$/.test(WEATHER.date || '') ? WEATHER.date : todayStr()
+  };
+}
+
 /* ============ boot / routing ============ */
 async function boot(){
   clearInterval(pollTimer);
@@ -8,12 +28,16 @@ async function boot(){
   if (!token || !me) return renderLogin(state.parents, state.kidLogins || []);
   await refresh();
   renderApp();
+  // Weather is decorative and must never delay the calendar itself.
+  refreshWeather().then(ok=>{
+    if(ok && D && !document.querySelector('.sheet.open')) renderApp(true);
+  });
   // Poll while the app is actually on screen; pause in the background to save battery.
   pollTimer = setInterval(async ()=>{
     if (document.visibilityState !== 'visible' || !navigator.onLine) return;
     // Don't rebuild the UI while a sheet is open — it would wipe a half-typed form.
     if (document.querySelector('.sheet.open')) return;
-    try{ await refresh(); renderApp(true); }catch(e){}
+    try{ await Promise.all([refresh(), refreshWeather()]); renderApp(true); }catch(e){}
   }, 25000);
 }
 
@@ -149,6 +173,7 @@ function renderApp(preserve){
   const isKid = D.role === 'kid';
   const wasOpen = preserve && document.querySelector('.sheet.open')?.id;
   const activeTheme = document.documentElement.dataset.theme || seasonalTheme();
+  const weather = currentWeather();
   document.documentElement.style.setProperty('--p1', D.parents[0]?.color || '#2F6D62');
   document.documentElement.style.setProperty('--p2', D.parents[1]?.color || '#C0702A');
   const inboxCount = isKid ? 0 : myInbox().length;
@@ -156,7 +181,12 @@ function renderApp(preserve){
 
   $('#app').innerHTML = `
   <header class="app">
-    <div class="brand display"><span class="season-mark" aria-hidden="true">${CALENDAR_THEMES[activeTheme].icon}</span>Our Calendar <span class="who">signed in as ${esc(whoName)}${isKid?' · view only':''}</span></div>
+    <div class="brand display"><span class="season-mark" aria-hidden="true">${CALENDAR_THEMES[activeTheme].icon}</span>Our Calendar <span class="who">signed in as ${esc(whoName)}${isKid?' · view only':''}</span>
+      ${weather?`<span class="weather-now" role="status" title="${esc(weather.description)} in ${esc(weather.location)}${weather.stale?' · last available reading':''}" aria-label="Current weather in ${esc(weather.location)}: ${esc(weather.description)}, ${weather.temperature_f} degrees">
+        <span class="weather-icon" aria-hidden="true">${esc(weather.icon)}</span>
+        <span class="weather-copy"><b>${weather.temperature_f}°</b><small>${esc(weather.location.replace(', AR',''))}${weather.stale?' · cached':''}</small></span>
+      </span>`:''}
+    </div>
     <div class="monthnav">
       <button class="iconbtn" id="prev" aria-label="Previous month">‹</button>
       <div class="month display">${MONTHS[view.getMonth()]} ${view.getFullYear()}</div>
@@ -330,6 +360,7 @@ function renderGrid(){
   const y=view.getFullYear(), m=view.getMonth();
   const first=new Date(y,m,1).getDay(), days=new Date(y,m+1,0).getDate();
   const tstr=todayStr();
+  const liveWeather=currentWeather();
   let html='';
   for(let i=0;i<first;i++) html+=`<div class="day blank"></div>`;
   for(let d=1;d<=days;d++){
@@ -337,6 +368,7 @@ function renderGrid(){
     const dow=new Date(y,m,d).getDay();
     const c=custodyFor(ds), cp=c.pid?parent(c.pid):null;
     const all=itemsOn(ds);
+    const weather = liveWeather && ds===liveWeather.date ? liveWeather : null;
     // Multi-day EVENTS render as a solid connecting bar; ON-CALL periods as a distinct
     // outlined bar (awareness, not a hard commitment); everything else as normal chips.
     const spans=all.filter(a=>a.type==='event'&&a.end_date);
@@ -362,7 +394,7 @@ function renderGrid(){
         style="color:${col};border-color:${col}">${label}</span>`;
     }).join('');
     html+=`
-    <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
+    <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''} ${weather?`has-weather weather-${weather.condition}`:''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
       <span class="num">${d}</span>
       ${cp?`<span class="who ${c.override?'override':''}" style="background:${cp.color}">${esc(cp.name[0])}</span>`:''}
       ${c.pendingSwap?`<span class="swaptag">swap?</span>`:''}
@@ -377,6 +409,9 @@ function renderGrid(){
           ${unsettled?'⏳ ':''}${a.time?`<span class="t">${fmtTime(a.time)}</span>`:''}${esc(a.title)}</span>`;
       }).join('')}
       ${appts.length>2?`<span class="more">+${appts.length-2} more</span>`:''}
+      ${weather?`<span class="weather-cell-badge" title="${esc(weather.description)} · ${weather.temperature_f}° in ${esc(weather.location)}" aria-label="${esc(weather.description)}, ${weather.temperature_f} degrees">
+        <span aria-hidden="true">${esc(weather.icon)}</span><span class="weather-temp">${weather.temperature_f}°</span>
+      </span>`:''}
     </button>`;
   }
   $('#grid').innerHTML=html;
