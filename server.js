@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const mail = require('./mailer');
+const push = require('./push');
 
 // ---------- storage ----------
 // On Railway, attach a Volume and it persists at RAILWAY_VOLUME_MOUNT_PATH.
@@ -92,6 +93,13 @@ CREATE TABLE IF NOT EXISTS settlements (
   amount_cents INTEGER NOT NULL,          -- how much was actually paid (partial allowed)
   note         TEXT,
   created_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint   TEXT PRIMARY KEY,            -- unique per browser/device subscription
+  parent_id  INTEGER NOT NULL,
+  p256dh     TEXT NOT NULL,
+  auth       TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 `);
 
@@ -244,6 +252,20 @@ const pName = id => pRow(id)?.name || '';
 // Email address for a parent, or null if they've turned notifications off / have no email.
 const mailTo = id => { const p = pRow(id); return (p && p.notify && p.email) ? p.email : null; };
 const kidName = id => id ? (db.prepare('SELECT name FROM kids WHERE id = ?').get(id)?.name || null) : null;
+
+// This parent's push subscriptions (one per device they've enabled notifications on).
+const pushSubs = id => db.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE parent_id = ?').all(id);
+// Fire a push send and prune any subscriptions it reports as dead. Fire-and-forget,
+// same as mail — a push hiccup must never fail the calendar action that triggered it.
+function firePush(promise) {
+  if (!promise) return;
+  promise.then(dead => {
+    if (dead && dead.length) {
+      const del = db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?');
+      dead.forEach(e => del.run(e));
+    }
+  }).catch(() => {});
+}
 
 const app = express();
 app.use(express.json());
@@ -520,7 +542,8 @@ app.get('/api/data', auth, (req, res) => {
   // Parents: full view. Flag which kids have a login PIN set, for the settings screen.
   const kidsOut = kids.map(k => ({ id: k.id, name: k.name, hasPin: !!k.pin_hash }));
   res.json({ role: 'parent', me: req.parentId, parents, kids: kidsOut, schedule, overrides,
-             appointments, pending, history, mailReady: mail.enabled });
+             appointments, pending, history, mailReady: mail.enabled,
+             pushReady: push.enabled, pushPublicKey: push.enabled ? push.publicKey : null });
 });
 
 // ---------- notification settings ----------
@@ -531,6 +554,25 @@ app.post('/api/me', auth, parentOnly, (req, res) => {
     return res.status(400).json({ error: "That doesn't look like an email address" });
   db.prepare('UPDATE parents SET email = ?, notify = ? WHERE id = ?')
     .run(e || null, notify ? 1 : 0, req.parentId);
+  res.json({ ok: true });
+});
+
+// ---------- push notifications (per-device; separate from the email toggle above) ----------
+app.post('/api/push/subscribe', auth, parentOnly, (req, res) => {
+  const sub = req.body || {};
+  const { endpoint, keys } = sub;
+  if (!endpoint || !keys?.p256dh || !keys?.auth)
+    return res.status(400).json({ error: 'Invalid push subscription' });
+  db.prepare(`
+    INSERT INTO push_subscriptions (endpoint, parent_id, p256dh, auth, created_at) VALUES (?,?,?,?,?)
+    ON CONFLICT(endpoint) DO UPDATE SET parent_id = excluded.parent_id, p256dh = excluded.p256dh, auth = excluded.auth
+  `).run(endpoint, req.parentId, keys.p256dh, keys.auth, now());
+  res.json({ ok: true });
+});
+
+app.post('/api/push/unsubscribe', auth, parentOnly, (req, res) => {
+  const { endpoint } = req.body || {};
+  if (endpoint) db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
   res.json({ ok: true });
 });
 
@@ -613,11 +655,13 @@ app.post('/api/appointments', auth, parentOnly, (req, res) => {
       to: addr, actor: pName(req.parentId), kind: 'assign', item,
       kid: kidName(kid_id), message: message || null
     });
+    firePush(push.approvalNeeded({ subs: pushSubs(other), actor: pName(req.parentId), kind: 'assign', item }));
   } else {
     const addr = mailTo(other);
     if (addr) mail.itemAdded({
       to: addr, actor: pName(req.parentId), item, kid: kidName(kid_id), owner: pid ? pName(pid) : null
     });
+    firePush(push.itemAdded({ subs: pushSubs(other), actor: pName(req.parentId), item, owner: pid ? pName(pid) : null }));
   }
 
   res.json({ id, pending: needsApproval });
@@ -670,6 +714,7 @@ app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
       to: addr, actor: pName(req.parentId), kind,
       item: { ...next, id: a.id }, prev: a, kid: kidName(next.kid_id), message: b.message || null
     });
+    firePush(push.approvalNeeded({ subs: pushSubs(other), actor: pName(req.parentId), kind, item: { ...next, id: a.id } }));
     return res.json({ ok: true, pending: true });
   }
 
@@ -689,6 +734,10 @@ app.put('/api/appointments/:id', auth, parentOnly, (req, res) => {
       to: addr, actor: pName(req.parentId), item: { ...next, id: a.id },
       kid: kidName(next.kid_id), owner: next.parent_id ? pName(next.parent_id) : null, edited: true
     });
+    firePush(push.itemAdded({
+      subs: pushSubs(other), actor: pName(req.parentId), item: { ...next, id: a.id },
+      owner: next.parent_id ? pName(next.parent_id) : null, edited: true
+    }));
   }
   res.json({ ok: true });
 });
@@ -699,8 +748,10 @@ app.delete('/api/appointments/:id', auth, parentOnly, (req, res) => {
     .run(now(), req.params.id);
   db.prepare('DELETE FROM appointments WHERE id = ?').run(req.params.id);
   if (a) {
-    const addr = mailTo(otherParent(req.parentId));
+    const other = otherParent(req.parentId);
+    const addr = mailTo(other);
     if (addr) mail.itemDeleted({ to: addr, actor: pName(req.parentId), item: a });
+    firePush(push.itemDeleted({ subs: pushSubs(other), actor: pName(req.parentId), item: a }));
   }
   res.json({ ok: true });
 });
@@ -723,6 +774,7 @@ app.post('/api/appointments/:id/handoff', auth, parentOnly, (req, res) => {
   if (addr) mail.approvalNeeded({
     to: addr, actor: pName(req.parentId), kind: 'reassign', item: a, kid: kidName(a.kid_id), message: req.body?.message || null
   });
+  firePush(push.approvalNeeded({ subs: pushSubs(other), actor: pName(req.parentId), kind: 'reassign', item: a }));
   res.json({ ok: true, pending: true });
 });
 
@@ -743,6 +795,10 @@ app.post('/api/swap', auth, parentOnly, (req, res) => {
     to: addr, actor: pName(req.parentId), kind: 'swap_day',
     date, newOwner: parent_id ? pName(parent_id) : null, message: message || null
   });
+  firePush(push.approvalNeeded({
+    subs: pushSubs(other), actor: pName(req.parentId), kind: 'swap_day',
+    date, newOwner: parent_id ? pName(parent_id) : null
+  }));
   res.json({ ok: true, pending: true });
 });
 
@@ -786,6 +842,10 @@ app.post('/api/proposals/:id/respond', auth, parentOnly, (req, res) => {
     to: addr, actor: pName(req.parentId), kind: p.kind, accepted: accept,
     item: a, date: p.date, newOwner: p.to_parent_on_date ? pName(p.to_parent_on_date) : null
   });
+  firePush(push.proposalAnswered({
+    subs: pushSubs(p.from_parent), actor: pName(req.parentId), kind: p.kind, accepted: accept,
+    item: a, date: p.date, newOwner: p.to_parent_on_date ? pName(p.to_parent_on_date) : null
+  }));
 
   res.json({ ok: true });
 });
@@ -875,11 +935,13 @@ app.post('/api/expenses', auth, parentOnly, (req, res) => {
     .run(req.parentId, other, cents, pct, description.trim(), cat, kid_id || null, date, type, status, now());
 
   const addr = mailTo(other);
+  const expItem = { description: description.trim(), amount_cents: cents, split_pct: pct, date, category: cat };
+  const expShare = Math.round(cents * pct / 100);
   if (addr) mail.expenseLogged({
     to: addr, actor: pName(req.parentId), type,
-    item: { description: description.trim(), amount_cents: cents, split_pct: pct, date, category: cat },
-    kid: kidName(kid_id), share_cents: Math.round(cents * pct / 100)
+    item: expItem, kid: kidName(kid_id), share_cents: expShare
   });
+  firePush(push.expenseLogged({ subs: pushSubs(other), actor: pName(req.parentId), type, item: expItem, share_cents: expShare }));
 
   res.json({ id: r.lastInsertRowid, status });
 });
@@ -909,6 +971,7 @@ app.post('/api/expenses/:id/respond', auth, parentOnly, (req, res) => {
     to: addr, actor: pName(req.parentId), action, next,
     item: e, share_cents: shareCents(e)
   });
+  firePush(push.expenseAnswered({ subs: pushSubs(e.created_by), actor: pName(req.parentId), action, item: e, share_cents: shareCents(e) }));
   res.json({ ok: true, status: next });
 });
 
@@ -973,6 +1036,11 @@ app.post('/api/expenses/settle', auth, parentOnly, (req, res) => {
     amount_cents: amt, remaining_cents: remaining,
     note: (req.body?.note || '').trim() || null
   });
+  firePush(push.expenseSettled({
+    subs: pushSubs(other), actor: pName(req.parentId),
+    from_name: pName(from), to_name: pName(to),
+    amount_cents: amt, remaining_cents: remaining
+  }));
   res.json({ ok: true, paid_cents: amt, remaining_cents: remaining });
 });
 
