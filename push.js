@@ -6,15 +6,32 @@ const webpush = require('web-push');
 //   VAPID_PRIVATE_KEY  the private key (never exposed to the client)
 //   VAPID_SUBJECT      e.g. "mailto:you@yourdomain.com" (contact info required by the push spec)
 //   APP_URL            e.g. "https://yourapp.up.railway.app"  (opened when a notification is tapped)
-const PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
-const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const SUBJECT = process.env.VAPID_SUBJECT || 'mailto:calendar@example.com';
+// Trim whitespace and stray quotes — pasting into a host's variables panel picks
+// those up easily, and web-push rejects the key outright if they're present.
+const clean = v => (v || '').trim().replace(/^["']|["']$/g, '');
+const PUBLIC_KEY = clean(process.env.VAPID_PUBLIC_KEY);
+const PRIVATE_KEY = clean(process.env.VAPID_PRIVATE_KEY);
+const SUBJECT = clean(process.env.VAPID_SUBJECT) || 'mailto:calendar@example.com';
 const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '') || '/';
 
-const enabled = !!(PUBLIC_KEY && PRIVATE_KEY);
-if (enabled) {
-  webpush.setVapidDetails(SUBJECT, PUBLIC_KEY, PRIVATE_KEY);
-  console.log('[push] Web push ready');
+// Push is optional. A missing OR malformed key must never take the calendar down —
+// web-push throws from setVapidDetails, so a bad paste would otherwise crash boot.
+let enabled = false;
+if (PUBLIC_KEY && PRIVATE_KEY) {
+  try {
+    webpush.setVapidDetails(SUBJECT, PUBLIC_KEY, PRIVATE_KEY);
+    enabled = true;
+    console.log('[push] Web push ready');
+  } catch (e) {
+    // The usual cause is the two keys being swapped: the public key decodes to
+    // 65 bytes (87 chars), the private key to 32 bytes (43 chars).
+    console.error(`[push] Push DISABLED — the VAPID keys were rejected: ${e.message}`);
+    console.error(`[push] VAPID_PUBLIC_KEY is ${PUBLIC_KEY.length} chars (expected 87), ` +
+                  `VAPID_PRIVATE_KEY is ${PRIVATE_KEY.length} chars (expected 43). ` +
+                  `If those are the wrong way round, swap them. ` +
+                  `Regenerate with: npx web-push generate-vapid-keys`);
+    console.error('[push] The calendar itself keeps working — you just will not get push notifications.');
+  }
 } else {
   console.log('[push] Push disabled — set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to turn it on.');
 }

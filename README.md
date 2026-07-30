@@ -64,10 +64,14 @@ The app works fine without this — you just won't get push notifications. To tu
 
 | Variable | What it is |
 |---|---|
-| `VAPID_PUBLIC_KEY` | the public key from step 1 |
-| `VAPID_PRIVATE_KEY` | the private key from step 1 — keep this secret |
+| `VAPID_PUBLIC_KEY` | the public key from step 1 — **87 characters** |
+| `VAPID_PRIVATE_KEY` | the private key from step 1 — **43 characters**, keep it secret |
 | `VAPID_SUBJECT` | e.g. `mailto:you@yourdomain.com` (contact info required by the push spec) |
 | `APP_URL` | e.g. `https://yourapp.up.railway.app` — opened when a notification is tapped |
+
+The two keys are easy to mix up, so check the lengths: the **public** key is the long
+one (87 chars), the **private** key is the short one (43 chars). If they're swapped, the
+log says `Vapid public key should be 65 bytes long when decoded` and push stays off.
 
 3. Redeploy, then each parent opens **⚙ settings -> Push notifications -> Enable notifications on this device** on their phone.
 
@@ -107,6 +111,7 @@ VAPID_PUBLIC_KEY=xxx VAPID_PRIVATE_KEY=yyy npm start
 ## Notes
 - SQLite via better-sqlite3 — zero config, lives on the volume.
 - Push is fire-and-forget, same as email: if a send fails the calendar action still succeeds, and a dead subscription (uninstalled app, revoked permission) is quietly dropped so it stops being retried.
+- Bad VAPID keys never take the calendar down — push just stays off and the log explains what was wrong with them.
 - Sessions persist until sign-out; token stored in each browser's localStorage.
 - Email is fire-and-forget: if the mail server hiccups, the calendar action still succeeds and the failure is logged.
 - To start over, delete `calendar.db` on the volume and redeploy.
