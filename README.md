@@ -14,6 +14,7 @@ A shared custody calendar for two parents. Week-on/week-off schedule, appointmen
 
   Anything that only affects yourself — taking an appointment, adding an unassigned event, adding a birthday — is immediate. Declining an appointment leaves it **unassigned** until one of you claims it; declining a swap leaves the day as it was.
 - **Email notifications** — you get an email when the other parent adds something, asks you to cover, answers your request, or switches a custody day. Each parent can turn theirs off in settings.
+- **Push notifications** — install the app to your home screen and turn on notifications in settings to get the same alerts straight on your phone, even with the app closed. Per-device, so each phone opts in separately.
 - **Auto-sync** — polls every 25 seconds, so you both see changes without refreshing.
 - **Seasonal themes** — automatic Spring, Summer, Autumn, and Winter palettes, plus manual choices and the original look. Each device remembers its own preference.
 - **Live Cabot weather** — current conditions and temperature for Cabot, Arkansas appear in the header. A 10-day forecast adds an icon, high/low temperatures, and matching sunshine, cloud, fog, rain, snow, or storm effects to each forecast day's calendar square. Weather is cached and never blocks the calendar.
@@ -54,6 +55,24 @@ SendGrid, Mailgun, and Postmark work the same way — plug in their host/user/pa
 
 After redeploying, the log shows `[mail] SMTP ready via <host>` if it connected. Wrong credentials show `[mail] SMTP not reachable` — the calendar keeps working, it just won't send.
 
+## Push notification setup (Railway -> Variables)
+
+The app works fine without this — you just won't get push notifications. To turn them on:
+
+1. Generate a VAPID keypair once (locally, not on Railway): `npx web-push generate-vapid-keys`.
+2. Add these variables in Railway:
+
+| Variable | What it is |
+|---|---|
+| `VAPID_PUBLIC_KEY` | the public key from step 1 |
+| `VAPID_PRIVATE_KEY` | the private key from step 1 — keep this secret |
+| `VAPID_SUBJECT` | e.g. `mailto:you@yourdomain.com` (contact info required by the push spec) |
+| `APP_URL` | e.g. `https://yourapp.up.railway.app` — opened when a notification is tapped |
+
+3. Redeploy, then each parent opens **⚙ settings -> Push notifications -> Enable notifications on this device** on their phone.
+
+This only works from an installed/home-screen app on iPhone (Safari, iOS 16.4+); on Android Chrome it works either installed or in the regular browser tab. Notifications are per-device — enable them separately on each phone. The log shows `[push] Web push ready` once the keys are set.
+
 ## What triggers an email
 **Needs your OK** (nothing has changed yet):
 | Action | Who gets it |
@@ -80,10 +99,14 @@ npm start
 
 # with email:
 SMTP_HOST=smtp.gmail.com SMTP_USER=you@gmail.com SMTP_PASS=xxxx npm start
+
+# with push:
+VAPID_PUBLIC_KEY=xxx VAPID_PRIVATE_KEY=yyy npm start
 ```
 
 ## Notes
 - SQLite via better-sqlite3 — zero config, lives on the volume.
+- Push is fire-and-forget, same as email: if a send fails the calendar action still succeeds, and a dead subscription (uninstalled app, revoked permission) is quietly dropped so it stops being retried.
 - Sessions persist until sign-out; token stored in each browser's localStorage.
 - Email is fire-and-forget: if the mail server hiccups, the calendar action still succeeds and the failure is logged.
 - To start over, delete `calendar.db` on the volume and redeploy.
@@ -105,5 +128,5 @@ Once installed it opens fullscreen with its own icon and no browser bar. It refr
 
 **Offline:** the app shell is cached, so it opens without a connection and shows a red "You're offline" bar. Calendar data is never cached (a stale custody day is worse than none), and any change you try to make while offline tells you it didn't save rather than pretending it did.
 
-**Notifications** are email-only (see Email setup above). Android web push is unreliable when the browser is closed, so email is the dependable channel for "she needs to approve this."
+**Notifications:** email works everywhere once configured (see Email setup above). Push (see Push notification setup above) also works with the app closed on Android (installed or just a browser tab) and on iPhone once installed to the home screen (Safari, iOS 16.4+) — turn it on per-device in ⚙ settings.
 

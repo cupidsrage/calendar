@@ -1131,6 +1131,62 @@ function expCard(e, box){
   </div>`;
 }
 
+/* ---- push notifications (per-device; separate from the email toggle) ---- */
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+function pushSupported(){
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+async function enablePush(){
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('Notifications permission denied'); return; }
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(D.pushPublicKey)
+    });
+  }
+  await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
+  toast('Push notifications turned on for this device');
+}
+
+async function disablePush(){
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    await api('/api/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } });
+    await sub.unsubscribe();
+  }
+  toast('Push notifications turned off for this device');
+}
+
+async function refreshPushButton(){
+  const btn = $('#push-toggle');
+  if (!btn) return;
+  if (!pushSupported()) { btn.textContent = 'Not supported on this device'; btn.disabled = true; return; }
+  if (Notification.permission === 'denied') { btn.textContent = 'Blocked — enable in phone settings'; btn.disabled = true; return; }
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  btn.disabled = false;
+  if (sub && Notification.permission === 'granted') {
+    btn.textContent = 'Turn off notifications on this device';
+    btn.classList.remove('primary');
+    btn.onclick = async () => { btn.disabled = true; try { await disablePush(); } finally { openSettings(); } };
+  } else {
+    btn.textContent = 'Enable notifications on this device';
+    btn.classList.add('primary');
+    btn.onclick = async () => { btn.disabled = true; try { await enablePush(); } catch(e){ toast('Could not enable notifications'); } finally { openSettings(); } };
+  }
+}
+
 /* ---- settings ---- */
 function themePicker(){
   const selected = document.documentElement.dataset.themeChoice || 'auto';
@@ -1184,8 +1240,15 @@ function openSettings(){
     <button class="btn primary" id="n-save" style="width:100%; margin-top:10px">Save notification settings</button>
     <div class="err" id="n-err"></div>
     <p class="empty">You'll get an email when ${esc(other().name)} asks you to take an appointment, proposes a day swap, changes something you already agreed to, or answers one of your requests — plus a heads-up when she adds something that doesn't need your approval. ${other().email?`${esc(other().name)} has an email set${other().notify?' and notifications on':' but notifications off'}.`:`${esc(other().name)} hasn't added an email yet, so they won't get any.`}</p>
+
+    <div class="section-h">Push notifications</div>
+    ${D.pushPublicKey ? `
+    <p class="empty" style="margin:4px 0 10px">Get a notification right on this phone the instant something changes — no need to have the app open. This is per-device, separate from email.</p>
+    <button class="btn" id="push-toggle" style="width:100%">Checking…</button>
+    ` : `<div class="warn">Push notifications aren't switched on for this calendar yet. Add VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in your Railway variables and redeploy.</div>`}
   </div>`;
   showSheet('#setsheet');
+  if (D.pushPublicKey) refreshPushButton();
   sheet.querySelector('.x').onclick=closeSheets;
   sheet.querySelectorAll('[data-theme-option]').forEach(button=>{
     button.onclick=()=>{
