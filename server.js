@@ -94,6 +94,18 @@ CREATE TABLE IF NOT EXISTS settlements (
   note         TEXT,
   created_at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS alerts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_parent  INTEGER NOT NULL,        -- who hit the emergency button
+  to_parent    INTEGER NOT NULL,        -- whose phone is being made to ring
+  message      TEXT,                    -- optional one-liner ("call me", "at the ER")
+  created_at   TEXT NOT NULL,
+  acked_at     TEXT,                    -- set when the other parent taps "I've seen it"
+  cancelled_at TEXT,                    -- set if the sender calls it off first
+  last_push_at TEXT,                    -- drives the repeat ticker below
+  push_count   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS alerts_live ON alerts (acked_at, cancelled_at, created_at);
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint   TEXT PRIMARY KEY,            -- unique per browser/device subscription
   parent_id  INTEGER NOT NULL,
@@ -542,7 +554,7 @@ app.get('/api/data', auth, (req, res) => {
   // Parents: full view. Flag which kids have a login PIN set, for the settings screen.
   const kidsOut = kids.map(k => ({ id: k.id, name: k.name, hasPin: !!k.pin_hash }));
   res.json({ role: 'parent', me: req.parentId, parents, kids: kidsOut, schedule, overrides,
-             appointments, pending, history, mailReady: mail.enabled,
+             appointments, pending, history, mailReady: mail.enabled, alerts: alertsFor(req.parentId),
              pushReady: push.enabled, pushPublicKey: push.enabled ? push.publicKey : null });
 });
 
@@ -575,6 +587,154 @@ app.post('/api/push/unsubscribe', auth, parentOnly, (req, res) => {
   if (endpoint) db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
   res.json({ ok: true });
 });
+
+// ---------- emergency alerts ----------
+// The one thing in this app that is allowed to be annoying. One parent hits the
+// button, the other parent's phone alerts over and over until they open the app and
+// say they've seen it.
+//
+// Honest limits, so nobody expects more than the web can give: a web push makes ONE
+// notification sound. There is no way for a website to hold a phone's ringer open the
+// way a phone call does. So "keeps making noise until you look" is built out of three
+// layers: (1) the server re-sends the push every ALERT_REPEAT_MS so the phone alerts
+// again and again, (2) the app plays a looping alarm whenever it's actually open, and
+// (3) an email goes out as a backstop. If the other phone has notifications switched
+// off entirely, only the email will land.
+const ALERT_REPEAT_MS = 20 * 1000;        // gap between repeat pushes
+const ALERT_MAX_REPEAT_MS = 10 * 60 * 1000; // stop re-pushing after this (battery, sanity)
+const ALERT_LIVE_MS = 6 * 60 * 60 * 1000;   // after this it's history, not a live emergency
+const ALERT_TICK_MS = 5 * 1000;
+
+const alertAge = row => Date.now() - new Date(row.created_at).getTime();
+
+// Rows that still count as an emergency in progress.
+const liveAlertRows = () => db.prepare(`
+  SELECT * FROM alerts WHERE acked_at IS NULL AND cancelled_at IS NULL ORDER BY created_at
+`).all().filter(a => alertAge(a) < ALERT_LIVE_MS);
+
+function alertOut(a) {
+  return {
+    id: a.id,
+    from_parent: a.from_parent,
+    to_parent: a.to_parent,
+    from_name: pName(a.from_parent),
+    to_name: pName(a.to_parent),
+    message: a.message || null,
+    created_at: a.created_at,
+    acked_at: a.acked_at || null
+  };
+}
+
+// What this parent needs to see: emergencies aimed at them, and the status of any
+// they've raised themselves (including one just acknowledged, so they get the relief
+// of seeing "seen at 7:42 PM" before it disappears).
+function alertsFor(parentId) {
+  const live = liveAlertRows();
+  const recentlyAcked = db.prepare(`
+    SELECT * FROM alerts WHERE from_parent = ? AND cancelled_at IS NULL AND acked_at IS NOT NULL
+    ORDER BY acked_at DESC LIMIT 1
+  `).all(parentId).filter(a => Date.now() - new Date(a.acked_at).getTime() < 5 * 60 * 1000);
+  return {
+    incoming: live.filter(a => a.to_parent === parentId).map(alertOut),
+    outgoing: [...live.filter(a => a.from_parent === parentId), ...recentlyAcked].map(alertOut)
+  };
+}
+
+// Fast, cheap endpoint the app polls every few seconds while it's on screen — much
+// lighter than the full /api/data payload, so it can run far more often.
+app.get('/api/alerts', auth, (req, res) => {
+  if (req.role !== 'parent') return res.json({ incoming: [], outgoing: [] });
+  res.json(alertsFor(req.parentId));
+});
+
+app.post('/api/alerts', auth, parentOnly, (req, res) => {
+  const to = otherParent(req.parentId);
+  if (!to) return res.status(400).json({ error: 'There is no second parent to alert' });
+  const message = String(req.body?.message || '').trim().slice(0, 200) || null;
+
+  // Already shouting? Don't stack a second alarm on top of the first — hand back the
+  // one that's already running so the button is safe to press twice.
+  const existing = liveAlertRows().find(a => a.from_parent === req.parentId);
+  if (existing) return res.json({ alert: alertOut(existing), already: true });
+
+  const at = now();
+  const r = db.prepare(`INSERT INTO alerts (from_parent, to_parent, message, created_at, last_push_at, push_count)
+                        VALUES (?,?,?,?,?,0)`).run(req.parentId, to, message, at, null);
+  const alert = db.prepare('SELECT * FROM alerts WHERE id = ?').get(r.lastInsertRowid);
+
+  sendAlertPush(alert);
+  mail.emergencyAlert({ to: pRow(to)?.email || null, actor: pName(req.parentId), message });
+
+  res.json({ alert: alertOut(alert) });
+});
+
+// Only the parent being alerted can clear it — that's what makes "until it's looked at"
+// mean something.
+app.post('/api/alerts/:id/ack', auth, parentOnly, (req, res) => {
+  const a = db.prepare('SELECT * FROM alerts WHERE id = ?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Alert not found' });
+  if (a.to_parent !== req.parentId) return res.status(403).json({ error: 'That alert is not for you' });
+  if (!a.acked_at && !a.cancelled_at) {
+    db.prepare('UPDATE alerts SET acked_at = ? WHERE id = ?').run(now(), a.id);
+    // Tell the sender their alarm got through, so they stop wondering.
+    firePush(push.sendToAll(pushSubs(a.from_parent), {
+      title: `${pName(req.parentId)} saw your emergency alert`,
+      body: 'They know. The alarm on their phone has stopped.'
+    }));
+    // Stand the alarm down on the acknowledger's OTHER devices too. The app can only
+    // close the notifications on the phone it's running on, and the emergency ones are
+    // requireInteraction — left alone they'd sit there shouting on a tablet nobody
+    // picked up. Same tag, so this replaces them rather than piling on.
+    firePush(push.emergencyCleared({
+      subs: pushSubs(a.to_parent),
+      title: 'Emergency cleared',
+      body: `You've let ${pName(a.from_parent)} know you've seen it.`
+    }));
+  }
+  res.json({ ok: true });
+});
+
+// False alarm — the sender can call off their own alert.
+app.post('/api/alerts/:id/cancel', auth, parentOnly, (req, res) => {
+  const a = db.prepare('SELECT * FROM alerts WHERE id = ?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Alert not found' });
+  if (a.from_parent !== req.parentId) return res.status(403).json({ error: 'That alert is not yours to cancel' });
+  if (!a.acked_at && !a.cancelled_at) {
+    db.prepare('UPDATE alerts SET cancelled_at = ? WHERE id = ?').run(now(), a.id);
+    // Replaces the shouting notification instead of adding a second one next to it.
+    firePush(push.emergencyCleared({
+      subs: pushSubs(a.to_parent),
+      title: `${pName(req.parentId)} called off the emergency`,
+      body: 'False alarm — nothing needed from you.'
+    }));
+  }
+  res.json({ ok: true });
+});
+
+function sendAlertPush(a) {
+  db.prepare('UPDATE alerts SET last_push_at = ?, push_count = push_count + 1 WHERE id = ?').run(now(), a.id);
+  firePush(push.emergencyAlert({
+    subs: pushSubs(a.to_parent),
+    actor: pName(a.from_parent),
+    message: a.message,
+    alertId: a.id,
+    repeat: a.push_count
+  }));
+}
+
+// One timer for every alert, rather than a timer per alert: state lives in the database,
+// so a redeploy or crash mid-emergency picks the repeats straight back up.
+setInterval(() => {
+  try {
+    for (const a of liveAlertRows()) {
+      if (alertAge(a) > ALERT_MAX_REPEAT_MS) continue;   // still live in-app, just stop buzzing
+      const since = a.last_push_at ? Date.now() - new Date(a.last_push_at).getTime() : Infinity;
+      if (since >= ALERT_REPEAT_MS) sendAlertPush(a);
+    }
+  } catch (e) {
+    console.error('[alerts] repeat tick failed:', e.message || e);
+  }
+}, ALERT_TICK_MS).unref?.();
 
 // ---------- custody schedule (alternating weeks) ----------
 app.post('/api/schedule', auth, parentOnly, (req, res) => {

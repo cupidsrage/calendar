@@ -53,6 +53,10 @@ function calendarWeather(ds){
 /* ============ boot / routing ============ */
 async function boot(){
   clearInterval(pollTimer);
+  clearInterval(alertPollTimer);
+  // Signing out must take any live alarm with it — it belongs to the account, not the phone.
+  ALERTS = { incoming: [], outgoing: [] };
+  renderAlerts();
   applyTheme();
   setOnline();
   const state = await api('/api/state');
@@ -60,6 +64,11 @@ async function boot(){
   if (!token || !me) return renderLogin(state.parents, state.kidLogins || []);
   await refresh();
   renderApp();
+  // An emergency raised while the app was closed should be on screen straight away.
+  if (new URLSearchParams(location.search).has('alert'))
+    history.replaceState(null, '', location.pathname);
+  refreshAlerts();
+  startAlertPolling();
   // Weather is decorative and must never delay the calendar itself.
   refreshWeather().then(ok=>{
     if(ok && D && !document.querySelector('.sheet.open')) renderApp(true);
@@ -73,7 +82,12 @@ async function boot(){
   }, 25000);
 }
 
-async function refresh(){ D = await api('/api/data?month='+monthKey(view)); }
+async function refresh(){
+  D = await api('/api/data?month='+monthKey(view));
+  // /api/data carries alerts too, so a failed fast-poll can never leave a live
+  // emergency invisible for long.
+  if (D.alerts) { ALERTS = D.alerts; renderAlerts(); }
+}
 
 /* ============ setup ============ */
 function renderSetup(){
@@ -225,6 +239,7 @@ function renderApp(preserve){
       <button class="iconbtn" id="next" aria-label="Next month">›</button>
       <button class="btn small" id="today">Today</button>
     </div>
+    ${isKid?'':`<button class="iconbtn sos" id="sos" aria-label="Send an emergency alert to ${esc(other()?.name||'the other parent')}" title="Emergency — alert ${esc(other()?.name||'the other parent')} now">🚨</button>`}
     ${isKid?'':`<button class="iconbtn" id="inbox" aria-label="Approvals">⏳${inboxCount?`<span class="badge">${inboxCount}</span>`:''}</button>`}
     ${isKid?'':`<button class="iconbtn" id="expenses" aria-label="Expenses">💰${expenseBadge()?`<span class="badge">${expenseBadge()}</span>`:''}</button>`}
     ${isKid?'':`<button class="iconbtn" id="settings" aria-label="Settings">⚙</button>`}
@@ -252,6 +267,7 @@ function renderApp(preserve){
   $('#prev').onclick=()=>goMonth(-1);
   $('#next').onclick=()=>goMonth(1);
   $('#today').onclick=()=>{ view=new Date(); view.setDate(1); refresh().then(()=>renderApp()); };
+  if($('#sos')) $('#sos').onclick=()=>raiseAlert();
   if($('#inbox')) $('#inbox').onclick=()=>openInbox();
   if($('#expenses')) $('#expenses').onclick=()=>openExpenses();
   if($('#settings')) $('#settings').onclick=()=>openSettings();
@@ -262,6 +278,7 @@ function renderApp(preserve){
   else if (wasOpen==='inboxsheet') openInbox();
 
   setupGridZoom();
+  renderAlerts();   // the header button was just rebuilt — re-arm it if an alert is live
 }
 
 /* ============ pinch-to-zoom on the calendar grid (touch only) ============
@@ -1131,6 +1148,240 @@ function expCard(e, box){
   </div>`;
 }
 
+/* ============ emergency alerts ============
+   One parent hits the button; the other parent's phone alerts over and over until they
+   open the app and say they've seen it.
+
+   Worth being straight about the limits, because they shape the design: a website
+   cannot hold a phone's ringer open the way an incoming call does. What it can do is
+   (1) get the server to re-send a push every 20s so the phone alerts again and again,
+   (2) play a real looping alarm any time the app itself is on screen, and (3) fall back
+   to email. That's what the three pieces below cover. */
+let ALERTS = { incoming: [], outgoing: [] };
+let alertPollTimer = null;
+let ackingAlert = false;
+
+async function refreshAlerts(){
+  if (!D || D.role !== 'parent' || !token) return;
+  try { ALERTS = await api('/api/alerts'); renderAlerts(); } catch(_){}
+}
+
+function startAlertPolling(){
+  clearInterval(alertPollTimer);
+  if (!D || D.role !== 'parent') return;
+  // Much faster than the 25s calendar poll — an emergency that shows up half a minute
+  // late isn't much of an emergency. It's a tiny query, and only while the app is open.
+  alertPollTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+    refreshAlerts();
+  }, 5000);
+}
+
+/* ---- the alarm itself ----
+   Synthesised rather than an audio file: nothing to download, nothing to cache, and it
+   runs for as long as it needs to. Phones refuse to let a page make noise until the
+   person has touched it at least once, so the audio is unlocked on the first tap and
+   the alert screen says so plainly while sound is still blocked. */
+const alarm = { ctx: null, timer: null, on: false };
+
+function alarmContext(){
+  if (!alarm.ctx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    try { alarm.ctx = new AC(); } catch(_) { return null; }
+  }
+  if (alarm.ctx.state === 'suspended') alarm.ctx.resume().catch(()=>{});
+  return alarm.ctx;
+}
+function alarmAudible(){ return !!alarm.ctx && alarm.ctx.state === 'running'; }
+
+function alarmBeep(){
+  const ctx = alarmContext();
+  if (ctx && ctx.state === 'running') {
+    const t0 = ctx.currentTime;
+    // Two falling tones — nags like an alarm clock rather than wailing like a siren.
+    [[880, 0], [660, 0.34]].forEach(([freq, offset]) => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = freq;
+      const at = t0 + offset;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.3, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(at); osc.stop(at + 0.32);
+    });
+  }
+  if (navigator.vibrate) { try { navigator.vibrate([420, 140, 420]); } catch(_){} }
+}
+
+function startAlarm(){
+  if (alarm.on) return;
+  alarm.on = true;
+  alarmBeep();
+  alarm.timer = setInterval(alarmBeep, 1100);
+}
+function stopAlarm(){
+  alarm.on = false;
+  clearInterval(alarm.timer);
+  alarm.timer = null;
+  if (navigator.vibrate) { try { navigator.vibrate(0); } catch(_){} }
+}
+// Any touch anywhere counts as the gesture that lets the page make sound.
+function unlockAlarmAudio(){
+  alarmContext();
+  updateAlertHint();
+}
+
+function alertAgo(iso){
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins === 1) return '1 minute ago';
+  if (mins < 60) return `${mins} minutes ago`;
+  const hrs = Math.round(mins / 60);
+  return hrs === 1 ? 'an hour ago' : `${hrs} hours ago`;
+}
+
+function updateAlertHint(){
+  const hint = $('#alert-hint');
+  if (!hint) return;
+  hint.textContent = alarmAudible()
+    ? 'The noise stops the moment you tap the button.'
+    : 'Tap anywhere to turn the sound on.';
+}
+
+function renderAlerts(){
+  drawIncomingAlert(ALERTS.incoming?.[0] || null);
+  drawOutgoingAlert(ALERTS.outgoing?.[0] || null);
+  const sos = $('#sos');
+  if (sos) sos.classList.toggle('armed', !!ALERTS.outgoing?.some(a => !a.acked_at));
+}
+
+// The receiving end. Lives on <body>, not inside #app, so a calendar re-render can
+// never wipe it — and there is deliberately no way to dismiss it except the button.
+function drawIncomingAlert(a){
+  const existing = $('#alertwrap');
+  if (!a) {
+    if (existing) existing.remove();
+    stopAlarm();
+    return;
+  }
+  if (existing && existing.dataset.id === String(a.id)) return;
+  if (existing) existing.remove();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'alert-wrap';
+  wrap.id = 'alertwrap';
+  wrap.dataset.id = String(a.id);
+  wrap.setAttribute('role', 'alertdialog');
+  wrap.setAttribute('aria-live', 'assertive');
+  wrap.setAttribute('aria-label', `Emergency alert from ${a.from_name}`);
+  wrap.innerHTML = `
+    <div class="alert-card">
+      <div class="alert-siren" aria-hidden="true">🚨</div>
+      <div class="alert-kicker">Emergency</div>
+      <div class="alert-who">${esc(a.from_name)} needs you right now</div>
+      ${a.message ? `<div class="alert-msg">${esc(a.message)}</div>` : ''}
+      <div class="alert-when">Sent ${esc(alertAgo(a.created_at))}</div>
+      <button class="alert-ack" id="alert-ack">I've seen it</button>
+      <div class="alert-hint" id="alert-hint"></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  $('#alert-ack').onclick = () => ackAlert(a.id);
+  startAlarm();
+  updateAlertHint();
+}
+
+async function ackAlert(id){
+  if (ackingAlert) return;
+  ackingAlert = true;
+  stopAlarm();                        // silence first — don't make them wait on the network
+  try {
+    await api('/api/alerts/' + id + '/ack', { method: 'POST' });
+    ALERTS.incoming = (ALERTS.incoming || []).filter(a => a.id !== id);
+    drawIncomingAlert(null);
+    clearAlertNotifications();
+    toast(`${esc(other()?.name || 'They')} now knows you've seen it`);
+  } catch(e) {
+    toast(e.error || "That didn't go through — tap again");
+    startAlarm();                     // still unacknowledged, so it keeps going
+  } finally { ackingAlert = false; }
+}
+
+async function cancelAlert(id){
+  try {
+    await api('/api/alerts/' + id + '/cancel', { method: 'POST' });
+    ALERTS.outgoing = (ALERTS.outgoing || []).filter(a => a.id !== id);
+    renderAlerts();
+    toast('Alert called off');
+  } catch(e) { toast(e.error || "Couldn't call it off"); }
+}
+
+// Clear the system notifications the repeats piled up, so the phone doesn't keep
+// showing an emergency that's already been dealt with.
+async function clearAlertNotifications(){
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const list = await reg.getNotifications({ tag: 'emergency' });
+    list.forEach(n => n.close());
+  } catch(_){}
+}
+
+// The sender's own status strip — did it land, and a way out if it was a mis-tap.
+function drawOutgoingAlert(a){
+  const existing = $('#alertsent');
+  if (!a) { if (existing) existing.remove(); return; }
+  const seen = !!a.acked_at;
+  const key = `${a.id}:${seen ? 1 : 0}`;
+  if (existing && existing.dataset.key === key) return;
+  if (existing) existing.remove();
+
+  const el = document.createElement('div');
+  el.className = 'alert-sent' + (seen ? ' seen' : '');
+  el.id = 'alertsent';
+  el.dataset.key = key;
+  el.setAttribute('role', 'status');
+  el.innerHTML = seen
+    ? `<span>✓ ${esc(a.to_name)} has seen your alert.</span>`
+    : `<span>🚨 Alerting ${esc(a.to_name)} until they see it.</span>
+       <button class="btn small" id="alert-cancel">False alarm</button>`;
+  document.body.appendChild(el);
+  if (!seen) $('#alert-cancel').onclick = () => cancelAlert(a.id);
+}
+
+async function raiseAlert(){
+  const who = other()?.name || 'them';
+  const message = await ask({
+    title: `Alert ${who} right now?`,
+    body: `Their phone will keep alerting until they open the calendar and say they've seen it. Add a line if you can — it shows on the alarm screen.`,
+    placeholder: 'e.g. Call me — at the ER with Ava',
+    ok: 'Send emergency alert',
+    danger: true
+  });
+  if (message === null) return;       // they backed out
+  unlockAlarmAudio();                 // the tap that just happened is our chance to unlock sound
+  try {
+    const r = await api('/api/alerts', { method: 'POST', body: { message } });
+    ALERTS.outgoing = [r.alert];
+    renderAlerts();
+    toast(r.already ? `Already alerting ${who}` : `Alerting ${who} now`);
+  } catch(e) { toast(e.error || "Couldn't send the alert"); }
+}
+
+// A push arriving, or the app coming back to the foreground, should show the alert
+// immediately rather than waiting for the next poll tick.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data?.type === 'emergency') refreshAlerts();
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshAlerts();
+});
+['pointerdown', 'touchend', 'keydown'].forEach(ev =>
+  document.addEventListener(ev, unlockAlarmAudio, { passive: true }));
+
 /* ---- push notifications (per-device; separate from the email toggle) ---- */
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -1232,6 +1483,10 @@ function openSettings(){
       </span></div>`).join('')||'<div class="empty">No kids added yet.</div>'}</div>
     <div class="addkid"><input id="k-name" placeholder="Kid's name"><button class="btn" id="k-add">Add</button></div>
     <p class="empty" style="margin:6px 0 0">Give a kid a PIN and they can sign in to see the calendar — but not change anything.</p>
+
+    <div class="section-h">Emergency button</div>
+    <p class="empty" style="margin:4px 0 6px">The 🚨 in the top bar alerts ${esc(other().name)} straight away — no approval, no waiting. Their phone alerts again every 20 seconds for up to 10 minutes, and the alarm screen stays up on their side until they tap <b>I've seen it</b>. You'll see the moment they do. Tapped it by mistake? Hit <b>False alarm</b> on the strip at the bottom.</p>
+    <p class="empty" style="margin:0 0 6px">Worth knowing: a web app can't take over the phone the way a real call does, so this works best if ${esc(other().name)} has push notifications switched on below${D.pushPublicKey?'':' (and push is set up for this calendar)'}. If they don't, the alert still reaches them by email — just not loudly. For a genuine life-or-death emergency, call 911 first.</p>
 
     <div class="section-h">Email notifications</div>
     ${D.mailReady?'':`<div class="warn">Email isn't switched on yet. Add RESEND_API_KEY (and MAIL_FROM) in your Railway variables and redeploy — the settings below will start working right away.</div>`}

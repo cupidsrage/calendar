@@ -88,6 +88,22 @@ function when(item) {
   return fmtDate(item.date) + (item.time ? ` at ${fmtTime(item.time)}` : '');
 }
 
+// ---- EMERGENCY. Belt-and-braces backup for the push alert: if their phone has
+// notifications off, or push failed, the email still lands. Sent once, at the moment
+// the alert is raised — the repeating is push's job, not the inbox's. ----
+function emergencyAlert({ to, actor, message }) {
+  const A = esc(actor);
+  send(to, `\u{1F6A8} EMERGENCY — ${actor} needs you now`, shell(
+    `${A} raised an emergency alert`, '#A33B2E',
+    [
+      ['Message', message ? `“${esc(message)}”` : `${A} didn’t leave a message — just needs you now.`],
+      ['Sent', new Date().toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })],
+      ['What to do', `Open the calendar and tap <b>I’ve seen it</b> — that stops the alarm on ${A}’s side and tells them you know.`]
+    ],
+    'Open the calendar'
+  ));
+}
+
 // ---- Something needs YOUR approval before it's real. ----
 function approvalNeeded({ to, actor, kind, item, prev, kid, message, date, newOwner }) {
   const A = esc(actor);
@@ -279,5 +295,5 @@ function expenseSettled({ to, actor, from_name, to_name, amount_cents, remaining
   ));
 }
 
-module.exports = { enabled, approvalNeeded, proposalAnswered, itemAdded, itemDeleted,
+module.exports = { enabled, emergencyAlert, approvalNeeded, proposalAnswered, itemAdded, itemDeleted,
                    expenseLogged, expenseAnswered, expenseSettled };
