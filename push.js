@@ -55,6 +55,25 @@ async function sendToAll(subs, payload) {
   return dead;
 }
 
+// ---- EMERGENCY. Ignore-proof by design: kind:'alert' tells the service worker to
+// use the loud notification options (stays on screen, re-alerts on every repeat,
+// long vibrate). The server keeps re-sending this every ALERT_REPEAT_MS until the
+// other parent acknowledges it — a single web push can only make one sound, so
+// "keeps going until you look at it" is built out of repeats, not one long ring.
+function emergencyAlert({ subs, actor, message, alertId, repeat = 0 }) {
+  const title = `🚨 EMERGENCY — ${actor}`;
+  const body = (message && message.trim())
+    ? message.trim()
+    : `${actor} needs you right now. Open the calendar.`;
+  return sendToAll(subs, { kind: 'alert', alertId, repeat, title, body });
+}
+
+// Stands a running alarm down. Carries the same notification tag as the emergency, so
+// it takes its place on screen rather than leaving a shouting notification behind it.
+function emergencyCleared({ subs, title, body }) {
+  return sendToAll(subs, { kind: 'alert-cleared', title, body });
+}
+
 // ---- Something needs YOUR approval before it's real. ----
 function approvalNeeded({ subs, actor, kind, item, date, newOwner }) {
   let title, body;
@@ -132,6 +151,7 @@ function expenseSettled({ subs, actor, from_name, to_name, amount_cents, remaini
 
 module.exports = {
   enabled, publicKey: PUBLIC_KEY, sendToAll,
+  emergencyAlert, emergencyCleared,
   approvalNeeded, proposalAnswered, itemAdded, itemDeleted,
   expenseLogged, expenseAnswered, expenseSettled
 };
