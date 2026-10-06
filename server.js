@@ -280,7 +280,11 @@ function firePush(promise) {
 }
 
 const app = express();
-app.use(express.json());
+// Receipt uploads have their own authenticated, bounded JSON parser below.
+app.use((req, res, next) => {
+  if (req.method === 'POST' && /^\/api\/expenses\/?$/i.test(req.path)) return next();
+  express.json()(req, res, next);
+});
 
 // The service worker must NEVER be cached by the browser — if it is, a redeploy
 // can leave a phone stuck on old code forever.
@@ -1033,6 +1037,53 @@ app.post('/api/proposals/:id/cancel', auth, parentOnly, (req, res) => {
 // consume specific expenses, it just moves the running balance. This lets someone
 // pay PART of what they owe: the balance simply shrinks by the amount paid.
 const EXP_CATS = ['medical', 'school', 'clothing', 'activities', 'other'];
+const MAX_RECEIPT_BYTES = 5 * 1024 * 1024;
+const MAX_RECEIPTS = 3;
+db.exec(`CREATE TABLE IF NOT EXISTS expense_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  expense_id INTEGER NOT NULL REFERENCES expenses(id),
+  name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  content BLOB NOT NULL
+); CREATE INDEX IF NOT EXISTS expense_receipts_expense ON expense_receipts(expense_id);`);
+
+function parseReceipts(receipts) {
+  if (receipts === undefined) return [];
+  if (!Array.isArray(receipts) || receipts.length > MAX_RECEIPTS)
+    throw new Error('Attach up to 3 receipts');
+  return receipts.map(receipt => {
+    if (!receipt || typeof receipt.name !== 'string' || !receipt.name.trim()
+        || receipt.name.length > 200 || /[\x00-\x1f\x7f/\\]/.test(receipt.name))
+      throw new Error('Each receipt needs a valid filename');
+    if (typeof receipt.data !== 'string' || !receipt.data.length
+        || receipt.data.length > 4 * Math.ceil(MAX_RECEIPT_BYTES / 3)
+        || receipt.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(receipt.data))
+      throw new Error('Each receipt must be a file of up to 5 MB');
+    const content = Buffer.from(receipt.data, 'base64');
+    if (!content.length || content.length > MAX_RECEIPT_BYTES || content.toString('base64') !== receipt.data)
+      throw new Error('Each receipt must be a file of up to 5 MB');
+    // Check the file signature as well as the declared type. Never serve HTML/SVG.
+    const types = {
+      'application/pdf': content.subarray(0, 5).equals(Buffer.from('%PDF-')),
+      'image/jpeg': content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff,
+      'image/png': content.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
+      'image/webp': content.toString('ascii', 0, 4) === 'RIFF' && content.toString('ascii', 8, 12) === 'WEBP'
+    };
+    if (!Object.hasOwn(types, receipt.type) || !types[receipt.type])
+      throw new Error('Receipts must be JPEG, PNG, WebP, or PDF files');
+    return { name: receipt.name.trim(), type: receipt.type, content };
+  });
+}
+
+app.get('/api/expenses/:id/receipts/:receiptId', auth, parentOnly, (req, res) => {
+  const receipt = db.prepare(`SELECT r.* FROM expense_receipts r
+    JOIN expenses e ON e.id = r.expense_id WHERE r.expense_id = ? AND r.id = ?`)
+    .get(req.params.id, req.params.receiptId);
+  if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
+  res.set({ 'Content-Type': receipt.mime_type, 'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `attachment; filename="receipt"; filename*=UTF-8''${encodeURIComponent(receipt.name).replace(/'/g, '%27')}` });
+  res.send(receipt.content);
+});
 
 // owed_by's share of one expense, in cents (rounded to the nearest cent).
 const shareCents = e => Math.round(e.amount_cents * e.split_pct / 100);
@@ -1062,6 +1113,13 @@ function balanceFor(viewer) {
 
 app.get('/api/expenses', auth, parentOnly, (req, res) => {
   const rows = db.prepare('SELECT * FROM expenses ORDER BY date DESC, id DESC').all();
+  const receipts = db.prepare('SELECT id, expense_id, name, mime_type, length(content) AS size FROM expense_receipts').all();
+  const byExpense = new Map();
+  for (const receipt of receipts) {
+    if (!byExpense.has(receipt.expense_id)) byExpense.set(receipt.expense_id, []);
+    byExpense.get(receipt.expense_id).push(receipt);
+  }
+  for (const expense of rows) expense.receipts = byExpense.get(expense.id) || [];
   res.json({
     me: req.parentId,
     expenses: rows,
@@ -1070,7 +1128,7 @@ app.get('/api/expenses', auth, parentOnly, (req, res) => {
   });
 });
 
-app.post('/api/expenses', auth, parentOnly, (req, res) => {
+app.post('/api/expenses', auth, parentOnly, express.json({ limit: '21mb' }), (req, res) => {
   const { amount_cents, split_pct, description, category, kid_id, date, type } = req.body || {};
   const cents = Math.round(Number(amount_cents));
   if (!Number.isFinite(cents) || cents <= 0)
@@ -1088,11 +1146,19 @@ app.post('/api/expenses', auth, parentOnly, (req, res) => {
   if (!other) return res.status(400).json({ error: 'No other parent configured' });
   const cat = EXP_CATS.includes(category) ? category : 'other';
   const status = type === 'necessity' ? 'owed' : 'pending';
+  let receipts;
+  try { receipts = parseReceipts(req.body.receipts); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
 
-  const r = db.prepare(`INSERT INTO expenses
+  const r = db.transaction(() => {
+    const result = db.prepare(`INSERT INTO expenses
     (created_by, owed_by, amount_cents, split_pct, description, category, kid_id, date, type, status, created_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
     .run(req.parentId, other, cents, pct, description.trim(), cat, kid_id || null, date, type, status, now());
+    const insert = db.prepare('INSERT INTO expense_receipts (expense_id, name, mime_type, content) VALUES (?,?,?,?)');
+    for (const receipt of receipts) insert.run(result.lastInsertRowid, receipt.name, receipt.type, receipt.content);
+    return result;
+  })();
 
   const addr = mailTo(other);
   const expItem = { description: description.trim(), amount_cents: cents, split_pct: pct, date, category: cat };
@@ -1159,7 +1225,10 @@ app.delete('/api/expenses/:id', auth, parentOnly, (req, res) => {
   if (!e) return res.status(404).json({ error: 'Not found' });
   if (e.created_by !== req.parentId)
     return res.status(403).json({ error: 'Only the person who logged it can remove it' });
-  db.prepare('DELETE FROM expenses WHERE id = ?').run(e.id);
+  db.transaction(() => {
+    db.prepare('DELETE FROM expense_receipts WHERE expense_id = ?').run(e.id);
+    db.prepare('DELETE FROM expenses WHERE id = ?').run(e.id);
+  })();
   res.json({ ok: true });
 });
 
@@ -1204,8 +1273,13 @@ app.post('/api/expenses/settle', auth, parentOnly, (req, res) => {
   res.json({ ok: true, paid_cents: amt, remaining_cents: remaining });
 });
 
+app.use((error, req, res, next) => {
+  if (error.type === 'entity.too.large') return res.status(413).json({ error: 'Receipts are too large. Attach up to 3 files, 5 MB each.' });
+  if (error.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON request' });
+  next(error);
+});
+
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Co-parent calendar running on :${PORT}, data in ${DATA_DIR}`));
-

@@ -14,6 +14,7 @@ A shared custody calendar for two parents. Week-on/week-off schedule, appointmen
 
   Anything that only affects yourself — taking an appointment, adding an unassigned event, adding a birthday — is immediate. Declining an appointment leaves it **unassigned** until one of you claims it; declining a swap leaves the day as it was.
 - **Email notifications** — you get an email when the other parent adds something, asks you to cover, answers your request, or switches a custody day. Each parent can turn theirs off in settings.
+- **Expense receipts** — attach up to three JPEG, PNG, WebP, or PDF receipts when logging an expense (5 MB per file). Both parents can download them; kid accounts cannot access them. Receipts are stored in the same SQLite database as the expense and removed when the expense is deleted, so the existing volume and database backups include them.
 - **Push notifications** — install the app to your home screen and turn on notifications in settings to get the same alerts straight on your phone, even with the app closed. Per-device, so each phone opts in separately.
 - **Emergency button (🚨)** — the one thing in the app that's allowed to be annoying. It skips approvals entirely: the other parent's phone alerts every 20 seconds for up to 10 minutes, and a full-screen alarm stays up on their side until they tap **I've seen it** — which you see happen. Optional one-line message, and a **False alarm** button if you mis-tapped. See [Emergency alerts](#emergency-alerts) for what it can and can't do.
 - **Auto-sync** — polls every 25 seconds, so you both see changes without refreshing (every 5 seconds for emergency alerts).
@@ -158,4 +159,3 @@ Once installed it opens fullscreen with its own icon and no browser bar. It refr
 **Offline:** the app shell is cached, so it opens without a connection and shows a red "You're offline" bar. Calendar data is never cached (a stale custody day is worse than none), and any change you try to make while offline tells you it didn't save rather than pretending it did.
 
 **Notifications:** email works everywhere once configured (see Email setup above). Push (see Push notification setup above) also works with the app closed on Android (installed or just a browser tab) and on iPhone once installed to the home screen (Safari, iOS 16.4+) — turn it on per-device in ⚙ settings.
-

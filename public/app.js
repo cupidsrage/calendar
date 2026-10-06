@@ -863,6 +863,23 @@ function expenseBadge(){
 
 async function loadExpenses(){ EXP = await api('/api/expenses'); }
 
+const RECEIPT_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+function receiptFilesError(files) {
+  if (files.length > 3) return 'Attach up to 3 receipts.';
+  if (files.some(f => !RECEIPT_TYPES.includes(f.type))) return 'Choose JPEG, PNG, WebP, or PDF receipts.';
+  if (files.some(f => !f.size || f.size > 5 * 1024 * 1024)) return 'Each receipt must be a file of up to 5 MB.';
+  return '';
+}
+function encodeReceipt(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, type: file.type, data: reader.result.split(',')[1] });
+    reader.onerror = () => reject({ error: 'Could not read the receipt. Please choose it again.' });
+    reader.onabort = reader.onerror;
+    reader.readAsDataURL(file);
+  });
+}
+
 // A two-field modal for recording a payment: amount (prefilled to the full balance)
 // plus an optional note. Resolves { amount_cents, note } or null if cancelled.
 function askPayment({ title, body, max }){
@@ -993,6 +1010,11 @@ function drawExpenses(){
     ${D.kids&&D.kids.length?`<div class="field"><label>Kid (optional)</label>
       <select id="e-kid"><option value="">—</option>${D.kids.map(k=>`<option value="${k.id}">${esc(k.name)}</option>`).join('')}</select></div>`:''}
     <div class="split-preview" id="e-preview"></div>
+    <div class="field"><label for="e-receipts">Receipts (optional)</label>
+      <input id="e-receipts" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple aria-describedby="e-receipt-hint">
+      <div class="hint" id="e-receipt-hint">Up to 3 photos or PDFs, 5 MB each. Both parents can download them.</div>
+      <div id="e-receipt-list" class="receipt-list"></div>
+    </div>
     <button class="btn primary" id="e-save" style="width:100%">Log it</button>
     <div class="err" id="e-err"></div>
 
@@ -1040,6 +1062,31 @@ function drawExpenses(){
   $('#e-amt').oninput=syncPreview;
   $('#e-split').onchange=syncPreview;
   syncExpForm();
+  $('#e-receipts').onchange = () => {
+    const files = Array.from($('#e-receipts').files);
+    $('#e-err').textContent = receiptFilesError(files);
+    $('#e-receipt-list').innerHTML = files.map(f => `<div>${esc(f.name)} (${(f.size / 1024 / 1024).toFixed(1)} MB)</div>`).join('')
+      + (files.length ? '<button type="button" class="btn small" id="e-clear-receipts">Clear receipts</button>' : '');
+    if ($('#e-clear-receipts')) $('#e-clear-receipts').onclick = () => {
+      $('#e-receipts').value = ''; $('#e-receipts').onchange();
+    };
+  };
+
+  sheet.querySelectorAll('[data-receipt]').forEach(button => {
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/expenses/${button.dataset.expense}/receipts/${button.dataset.receipt}`, { headers: { 'x-token': token } });
+        if (!response.ok) throw await response.json().catch(() => ({ error: 'Could not download receipt' }));
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = url; link.download = button.dataset.name;
+        document.body.appendChild(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch (error) { toast(error.error || 'Could not download receipt'); }
+      finally { button.disabled = false; }
+    };
+  });
 
   if($('#e-settle')) $('#e-settle').onclick=async()=>{
     const payer = bal>0 ? o.name : 'You';
@@ -1065,10 +1112,18 @@ function drawExpenses(){
     if(!body.description){ $('#e-err').textContent='Add a short description.'; return; }
     if(!amt||amt<=0){ $('#e-err').textContent='Enter an amount greater than zero.'; return; }
     if(!body.date){ $('#e-err').textContent='Pick a date.'; return; }
-    try{ const r=await api('/api/expenses',{method:'POST',body});
+    const files = Array.from($('#e-receipts').files);
+    const receiptError = receiptFilesError(files);
+    if (receiptError) { $('#e-err').textContent = receiptError; return; }
+    const saveButton = $('#e-save');
+    saveButton.disabled = true; $('#e-err').textContent = '';
+    try{
+      body.receipts = await Promise.all(files.map(encodeReceipt));
+      const r=await api('/api/expenses',{method:'POST',body});
       await openExpenses();
       toast(r.status==='pending'?`Sent to ${o.name} — waiting on her`:'Logged');
     }catch(e){ $('#e-err').textContent=e.error||'Could not save'; }
+    finally { saveButton.disabled = false; }
   };
 
   // Card action buttons
@@ -1144,6 +1199,7 @@ function expCard(e, box){
     <div class="exp-top"><b>${esc(e.description)}</b>${badge}${statusTag}</div>
     <div class="exp-meta">${catLabel(e.category)}${kid?' · '+esc(kid.name):''} · ${fmtDate(e.date)}</div>
     <div class="exp-money">${moneyLine}</div>
+    ${(e.receipts || []).length ? `<div class="receipt-list">${e.receipts.map(r => `<button class="btn small receipt-download" data-expense="${e.id}" data-receipt="${r.id}" data-name="${esc(r.name)}">📎 Download ${esc(r.name)}</button>`).join('')}</div>` : ''}
     ${actions?`<div class="actions">${actions}</div>`:''}
   </div>`;
 }
@@ -1581,4 +1637,3 @@ function openSettings(){
 }
 
 boot().catch(e=>{ $('#app').innerHTML='<div class="gate"><div class="gate-card">Could not reach the server. Refresh to try again.</div></div>'; });
-
