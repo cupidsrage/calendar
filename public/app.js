@@ -880,6 +880,54 @@ function encodeReceipt(file) {
   });
 }
 
+async function viewReceipt(button) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'receipt-viewer';
+  dialog.setAttribute('aria-label', 'Receipt preview');
+  dialog.innerHTML = `<div class="receipt-viewer-header"><h2></h2><button class="btn small" autofocus>Close</button></div>
+    <div class="receipt-viewer-content"><p role="status">Loading receipt…</p></div>
+    <div class="receipt-viewer-footer"></div>`;
+  dialog.querySelector('h2').textContent = button.dataset.name;
+  const controller = new AbortController();
+  let url;
+  dialog.querySelector('button').onclick = () => dialog.close();
+  dialog.addEventListener('close', () => {
+    controller.abort();
+    if (url) URL.revokeObjectURL(url);
+    dialog.remove();
+    if (button.isConnected) button.focus();
+  }, { once: true });
+  document.body.appendChild(dialog);
+  dialog.showModal();
+  try {
+    const response = await fetch(`/api/expenses/${button.dataset.expense}/receipts/${button.dataset.receipt}`, {
+      headers: { 'x-token': token }, signal: controller.signal
+    });
+    if (!response.ok) throw await response.json().catch(() => ({ error: 'Could not load receipt' }));
+    const blob = await response.blob();
+    if (!dialog.open) return;
+    if (!RECEIPT_TYPES.includes(blob.type)) throw { error: 'Unsupported receipt format' };
+    url = URL.createObjectURL(blob);
+    const preview = document.createElement(blob.type === 'application/pdf' ? 'iframe' : 'img');
+    preview.src = url;
+    if (preview.tagName === 'IMG') {
+      preview.alt = button.dataset.name;
+      preview.onerror = () => {
+        dialog.querySelector('.receipt-viewer-content').textContent = 'This photo could not be displayed. You can still download it below.';
+      };
+    } else {
+      preview.title = button.dataset.name;
+    }
+    dialog.querySelector('.receipt-viewer-content').replaceChildren(preview);
+    const download = document.createElement('a');
+    download.className = 'btn small'; download.textContent = 'Download receipt';
+    download.href = url; download.download = button.dataset.name;
+    dialog.querySelector('.receipt-viewer-footer').appendChild(download);
+  } catch (error) {
+    if (!controller.signal.aborted) dialog.querySelector('.receipt-viewer-content').textContent = error.error || 'Could not load receipt. Please try again.';
+  }
+}
+
 // A two-field modal for recording a payment: amount (prefilled to the full balance)
 // plus an optional note. Resolves { amount_cents, note } or null if cancelled.
 function askPayment({ title, body, max }){
@@ -1012,7 +1060,7 @@ function drawExpenses(){
     <div class="split-preview" id="e-preview"></div>
     <div class="field"><label for="e-receipts">Receipts (optional)</label>
       <input id="e-receipts" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple aria-describedby="e-receipt-hint">
-      <div class="hint" id="e-receipt-hint">Up to 3 photos or PDFs, 5 MB each. Both parents can download them.</div>
+      <div class="hint" id="e-receipt-hint">Up to 3 photos or PDFs, 5 MB each. Both parents can view them.</div>
       <div id="e-receipt-list" class="receipt-list"></div>
     </div>
     <button class="btn primary" id="e-save" style="width:100%">Log it</button>
@@ -1073,19 +1121,7 @@ function drawExpenses(){
   };
 
   sheet.querySelectorAll('[data-receipt]').forEach(button => {
-    button.onclick = async () => {
-      button.disabled = true;
-      try {
-        const response = await fetch(`/api/expenses/${button.dataset.expense}/receipts/${button.dataset.receipt}`, { headers: { 'x-token': token } });
-        if (!response.ok) throw await response.json().catch(() => ({ error: 'Could not download receipt' }));
-        const url = URL.createObjectURL(await response.blob());
-        const link = document.createElement('a');
-        link.href = url; link.download = button.dataset.name;
-        document.body.appendChild(link); link.click(); link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-      } catch (error) { toast(error.error || 'Could not download receipt'); }
-      finally { button.disabled = false; }
-    };
+    button.onclick = () => viewReceipt(button);
   });
 
   if($('#e-settle')) $('#e-settle').onclick=async()=>{
@@ -1199,7 +1235,7 @@ function expCard(e, box){
     <div class="exp-top"><b>${esc(e.description)}</b>${badge}${statusTag}</div>
     <div class="exp-meta">${catLabel(e.category)}${kid?' · '+esc(kid.name):''} · ${fmtDate(e.date)}</div>
     <div class="exp-money">${moneyLine}</div>
-    ${(e.receipts || []).length ? `<div class="receipt-list">${e.receipts.map(r => `<button class="btn small receipt-download" data-expense="${e.id}" data-receipt="${r.id}" data-name="${esc(r.name)}">📎 Download ${esc(r.name)}</button>`).join('')}</div>` : ''}
+    ${(e.receipts || []).length ? `<div class="receipt-list">${e.receipts.map(r => `<button class="btn small receipt-download" data-expense="${e.id}" data-receipt="${r.id}" data-name="${esc(r.name)}">📎 View ${esc(r.name)}</button>`).join('')}</div>` : ''}
     ${actions?`<div class="actions">${actions}</div>`:''}
   </div>`;
 }
