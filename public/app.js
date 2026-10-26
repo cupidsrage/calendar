@@ -250,6 +250,7 @@ function renderApp(preserve){
     <span>⏳ waiting on approval</span>
     <span><i style="background:#9AA093"></i>unassigned</span>
     <span><i style="background:#fff;border:2px dashed var(--ink)"></i>swapped day</span>
+    ${D.holidays?.father_id?`<span>🎉 holiday (beats the regular week)</span>`:''}
     <span>🎂 birthday</span>
     <span>📟 on call</span>
   </div>
@@ -441,11 +442,18 @@ function renderGrid(){
       return `<span class="oncallbar ${isStart?'s-start':''} ${isEnd?'s-end':''}"
         style="color:${col};border-color:${col}">${label}</span>`;
     }).join('');
+    // A mid-day handover (holiday start/end) splits the square diagonally: morning
+    // parent top-left, overnight parent bottom-right.
+    const mp=c.exchanges.length&&c.morning?parent(c.morning):null;
+    const cellBg=cp&&mp?`background:linear-gradient(135deg,${tint(mp.color,.16)} 50%,${tint(cp.color,.16)} 50%);`
+                :cp?`background:${tint(cp.color,.10)};`:'';
+    const hol=c.holidays[0];
     html+=`
-    <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''} ${weather?`has-weather weather-${weather.condition}`:''}" data-d="${ds}" style="${cp?`background:${tint(cp.color,.10)};`:''}">
+    <button class="day ${ds===tstr?'today':''} ${c.pendingSwap?'pendingswap':''} ${weather?`has-weather weather-${weather.condition}`:''}" data-d="${ds}" style="${cellBg}">
       <span class="num">${d}</span>
       ${cp?`<span class="who ${c.override?'override':''}" style="background:${cp.color}">${esc(cp.name[0])}</span>`:''}
       ${c.pendingSwap?`<span class="swaptag">swap?</span>`:''}
+      ${hol?`<span class="hol" style="color:${parent(hol.pid).color}" title="${esc(hol.name)} — ${esc(parent(hol.pid).name)}">${hol.icon} ${esc(hol.name.replace(/ \((first|second) half\)/,''))}</span>`:''}
       ${oncallBars}
       ${spanBars}
       ${shown.map(a=>{
@@ -473,6 +481,26 @@ function closeSheets(){
 }
 function showSheet(id){ closeSheets(); $('#overlay').classList.add('open'); $(id).classList.add('open'); if(id==='#daysheet'){} }
 
+/* ---- holidays ---- */
+const HOL_DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function fmtStamp(t){
+  const [y,m,d]=t.slice(0,10).split('-').map(Number);
+  const day=new Date(y,m-1,d);
+  return `${HOL_DOW[day.getDay()]} ${MONTHS[m-1].slice(0,3)} ${d}, ${fmtTime(t.slice(11))}`;
+}
+// Which holidays touch this day, whose they are, and any handover times.
+function holidayInfo(c, ds){
+  const hols=c.holidays.map(h=>`<div class="holbox" style="border-color:${parent(h.pid).color}">
+      <div class="holhead">${h.icon} ${esc(h.name)} — <b style="color:${parent(h.pid).color}">${esc(parent(h.pid).name)}</b></div>
+      <div class="holbody">${fmtStamp(h.start)} until ${fmtStamp(h.end)} · ${h.role==='father'?'Father':'Mother'} ${h.key==='mothersday'||h.key==='fathersday'?'every year':h.year%2?'in odd years':'in even years'}</div>
+    </div>`).join('');
+  const swaps=c.override?'':c.exchanges.map(x=>`<div class="holx">⇄ Exchange at <b>${fmtTime(x.time)}</b>: ${x.from?esc(parent(x.from).name):'—'} → ${x.to?esc(parent(x.to).name):'—'}</div>`).join('');
+  const brkMissing=D.holidays?.father_id && ds.slice(5)>='12-01' && ds.slice(5)<='12-31'
+    && !(D.holidays.breaks||[]).some(b=>+b.year===+ds.slice(0,4))
+    ? `<div class="holx">🎄 ${ds.slice(0,4)} winter break dates aren't set, so the Christmas split isn't on the calendar yet${D.role==='kid'?'':' — add them in ⚙ settings'}.</div>`:'';
+  return hols||swaps||brkMissing?`<div class="holwrap">${hols}${swaps}${brkMissing}</div>`:'';
+}
+
 /* ---- day sheet ---- */
 function openDay(ds){
   openDate=ds;
@@ -489,6 +517,7 @@ function openDay(ds){
         ${cp?`<span class="custody-tag" style="background:${cp.color}">${esc(cp.name)}'s day${c.override?' (swapped)':''}</span>`
             :`<span class="empty">No custody day set.</span>`}
       </div>
+      ${holidayInfo(c, ds)}
       <div class="section-h">On this day</div>
       ${appts.length?appts.map(a=>apptCard(a,ds)).join(''):`<div class="empty">Nothing scheduled.</div>`}
     </div>`;
@@ -524,6 +553,7 @@ function openDay(ds){
       ${cp&&!ps?`<button class="btn small" id="d-swap">Ask to swap to ${esc(parent(swapTarget).name)}</button>`:''}
       ${c.override&&!ps?`<button class="btn small" id="d-reset">Ask to undo swap</button>`:''}
     </div>
+    ${holidayInfo(c, ds)}
     ${swapUI}
 
     <div class="section-h">On this day</div>
@@ -1548,6 +1578,19 @@ function themePicker(){
   <p class="empty" style="margin:4px 0 6px">Saved on this device. Automatic mode uses spring (Mar–May), summer (Jun–Aug), autumn (Sep–Nov), and winter (Dec–Feb).</p>`;
 }
 
+// This year's and next year's holidays, with whose each one is.
+function holidayPreview(){
+  const fid=D.holidays.father_id, mid=D.parents.find(p=>p.id!==fid)?.id;
+  const y=new Date().getFullYear();
+  return [y,y+1].map(yr=>{
+    const rows=Holidays.holidayPeriods(yr, D.holidays.breaks||[]).map(h=>{
+      const p=parent(h.role==='father'?fid:mid);
+      return `<div class="holrow"><span>${h.icon} ${esc(h.name)}</span><span class="holdate">${fmtStamp(h.start)} – ${fmtStamp(h.end)}</span><b style="color:${p.color}">${esc(p.name)}</b></div>`;
+    }).join('');
+    return `<div class="holyear"><div class="holyh">${yr}</div>${rows}</div>`;
+  }).join('');
+}
+
 function openSettings(){
   const sheet=$('#setsheet');
   const mine=parent(D.me);
@@ -1566,6 +1609,21 @@ function openSettings(){
     </div>
     <button class="btn primary" id="sc-save" style="width:100%">Save schedule</button>
     <p class="empty" style="margin:8px 0 6px">Weeks alternate automatically from there, forever. One-off switches are done from the day itself (open a day → Switch).</p>
+
+    <div class="section-h">Holiday schedule</div>
+    <p class="empty" style="margin:4px 0 8px">Holidays always take precedence over the regular weeks. Mother's Day and Father's Day go to the same parent every year; the rest alternate by even and odd years.</p>
+    <div class="field"><label>Who is Father in the custody order?</label>
+      <select id="hol-father"><option value="">Holiday schedule off</option>${D.parents.map(p=>`<option value="${p.id}" ${D.holidays?.father_id===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+    </div>
+    ${D.holidays?.father_id?holidayPreview():''}
+    <div class="section-h" style="font-size:13px">Christmas — school winter break</div>
+    <p class="empty" style="margin:4px 0 8px">Christmas is split at 6:00 PM on Christmas Eve. The first half starts at 6:00 PM the day school holiday begins; the second half ends at 6:00 PM the day before school starts back. Enter the school dates each year.</p>
+    ${(D.holidays?.breaks||[]).map(b=>`<div class="kidrow"><span><b>${b.year}</b> · begins ${fmtDate(b.starts)}, back ${fmtDate(b.resumes)}</span>
+      <button class="btn small danger" data-brk="${b.year}">Remove</button></div>`).join('')}
+    <div class="field"><label>Day school holiday begins</label><input type="date" id="brk-start"></div>
+    <div class="field"><label>Day school starts back</label><input type="date" id="brk-end"></div>
+    <button class="btn" id="brk-save" style="width:100%">Save winter break</button>
+    <div class="err" id="brk-err"></div>
     <div class="section-h">Kids</div>
     <div id="kidlist">${D.kids.map(k=>`<div class="kidrow"><span>${esc(k.name)}${k.hasPin?' <span class="tag">view-only login on</span>':''}</span>
       <span style="display:flex;gap:6px">
@@ -1614,7 +1672,7 @@ function openSettings(){
   // Preselect current schedule values if set
   if(D.schedule){
     $('#sc-dow').value = new Date(D.schedule.anchor_date+'T12:00:00').getDay();
-    $('#sc-who').value = custodyFor(todayStr()).pid || D.schedule.anchor_parent;
+    $('#sc-who').value = baseCustodyFor(todayStr()) || D.schedule.anchor_parent;
   }
   $('#sc-save').onclick=async()=>{
     const dow=+$('#sc-dow').value, who=+$('#sc-who').value;
@@ -1626,6 +1684,23 @@ function openSettings(){
     await api('/api/schedule',{method:'POST',body:{anchor_date:anchor,anchor_parent:who}});
     await refresh(); renderApp(); openSettings(); toast('Schedule saved');
   };
+  $('#hol-father').onchange=async()=>{
+    const v=$('#hol-father').value;
+    await api('/api/holidays',{method:'POST',body:{father_id:v?+v:null}});
+    await refresh(); renderApp(); openSettings(); toast(v?'Holiday schedule on':'Holiday schedule off');
+  };
+  $('#brk-save').onclick=async()=>{
+    try{
+      const r=await api('/api/school-breaks',{method:'POST',body:{starts:$('#brk-start').value,resumes:$('#brk-end').value}});
+      await refresh(); renderApp(); openSettings(); toast(`${r.year} winter break saved`);
+    }catch(e){ $('#brk-err').textContent=e.error||'Could not save'; }
+  };
+  sheet.querySelectorAll('[data-brk]').forEach(b=>{
+    b.onclick=async()=>{
+      await api('/api/school-breaks/'+b.dataset.brk,{method:'DELETE'});
+      await refresh(); renderApp(); openSettings();
+    };
+  });
   $('#k-add').onclick=async()=>{
     const name=$('#k-name').value.trim(); if(!name) return;
     await api('/api/kids',{method:'POST',body:{name}});

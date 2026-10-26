@@ -303,6 +303,16 @@ header.app{
 .x{border:none; background:none; font-size:20px; line-height:1; padding:4px 8px}
 
 .custody-row{display:flex; align-items:center; gap:10px; margin-bottom:18px; flex-wrap:wrap}
+.day .hol{font-size:10.5px; font-weight:800; line-height:1.2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.holwrap{margin:-8px 0 16px; display:flex; flex-direction:column; gap:8px}
+.holbox{border-left:4px solid; background:var(--glow); border-radius:8px; padding:8px 10px}
+.holhead{font-weight:600; font-size:14px}
+.holbody,.holx{font-size:12.5px; color:var(--muted); margin-top:2px}
+.holyear{margin:0 0 10px}
+.holyh{font-weight:700; font-size:13px; margin:6px 0 4px}
+.holrow{display:grid; grid-template-columns:1fr auto; gap:0 8px; font-size:12.5px; padding:5px 0; border-bottom:1px solid var(--line)}
+.holrow .holdate{grid-column:1; color:var(--muted); font-size:11.5px}
+.holrow b{grid-column:2; grid-row:1 / span 2; align-self:center}
 .custody-tag{font-weight:700; color:#fff; border-radius:8px; padding:4px 10px; font-size:13px}
 
 .appt{border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px}
@@ -762,18 +772,27 @@ async function softRefresh(){
   } catch(e) {}
 }
 
-function custodyFor(ds){
-  const ov = D.overrides.find(o=>o.date===ds);
-  const pendingSwap = (D.pending||[]).find(p=>p.kind==='swap_day'&&p.date===ds);
-  if (ov) return { pid: ov.parent_id, override:true, pendingSwap };
-  if (!D.schedule) return { pid:null, override:false, pendingSwap };
+// Regular week-on/week-off owner of a date, ignoring holidays and swaps.
+function baseCustodyFor(ds){
+  if (!D.schedule) return null;
   const a = new Date(D.schedule.anchor_date+'T12:00:00');
   const d = new Date(ds+'T12:00:00');
   const wk = Math.floor(Math.round((d-a)/86400000)/7);
   const even = ((wk%2)+2)%2 === 0;
-  const pid = even ? D.schedule.anchor_parent
-                   : D.parents.find(p=>p.id!==D.schedule.anchor_parent)?.id || null;
-  return { pid, override:false, pendingSwap };
+  return even ? D.schedule.anchor_parent
+              : D.parents.find(p=>p.id!==D.schedule.anchor_parent)?.id || null;
+}
+// Who has the kids on a date. Accepted swaps win; otherwise the holiday schedule
+// (which always supersedes regular visitation), then the weekly rotation.
+// pid = who has them overnight; morning/exchanges describe a mid-day handover.
+function custodyFor(ds){
+  const ov = D.overrides.find(o=>o.date===ds);
+  const pendingSwap = (D.pending||[]).find(p=>p.kind==='swap_day'&&p.date===ds);
+  const fatherId = D.holidays?.father_id || null;
+  const motherId = fatherId ? D.parents.find(p=>p.id!==fatherId)?.id || null : null;
+  const day = Holidays.custodyDay(ds, { baseFor: baseCustodyFor, fatherId, motherId, breaks: D.holidays?.breaks || [] });
+  if (ov) return { pid: ov.parent_id, morning: ov.parent_id, exchanges: [], holidays: day.holidays, override:true, pendingSwap };
+  return { ...day, override:false, pendingSwap };
 }
 // Items landing on a date; birthdays match month+day every year.
 function itemsOn(ds){
@@ -797,6 +816,7 @@ function tint(hex, a){
   return `rgba(${r},${g},${b},${a})`;
 }
 </script>
+<script src="/holidays.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
