@@ -38,6 +38,15 @@ CREATE TABLE IF NOT EXISTS schedule (
   anchor_date TEXT NOT NULL,        -- YYYY-MM-DD, first day of a custody week
   anchor_parent INTEGER NOT NULL    -- whose week starts on anchor_date; alternates every 7 days
 );
+CREATE TABLE IF NOT EXISTS holiday_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  father_id INTEGER                 -- which parent the order calls FATHER; NULL = holidays off
+);
+CREATE TABLE IF NOT EXISTS school_breaks (
+  year INTEGER PRIMARY KEY,         -- the Christmas this winter break belongs to
+  starts TEXT NOT NULL,             -- YYYY-MM-DD the school holiday begins
+  resumes TEXT NOT NULL             -- YYYY-MM-DD school starts back
+);
 CREATE TABLE IF NOT EXISTS overrides (
   date TEXT PRIMARY KEY,            -- YYYY-MM-DD; only ACCEPTED swaps land here
   parent_id INTEGER
@@ -524,6 +533,10 @@ app.get('/api/data', auth, (req, res) => {
   const kids = db.prepare('SELECT * FROM kids ORDER BY name').all();
   const schedule = db.prepare('SELECT anchor_date, anchor_parent FROM schedule WHERE id = 1').get() || null;
   const overrides = db.prepare("SELECT * FROM overrides WHERE date LIKE ?").all(month + '%');
+  const holidays = {
+    father_id: db.prepare('SELECT father_id FROM holiday_settings WHERE id = 1').get()?.father_id || null,
+    breaks: db.prepare('SELECT year, starts, resumes FROM school_breaks ORDER BY year').all()
+  };
   // Regular items in this month, plus birthdays whose MM matches (they recur yearly),
   // plus multi-day events whose range overlaps this month (may start before / end after).
   const mStart = month + '-01';
@@ -553,11 +566,11 @@ app.get('/api/data', auth, (req, res) => {
     return res.json({ role: 'kid', me: null, kidId: req.kidId,
       parents: parents.map(p => ({ id: p.id, name: p.name, color: p.color })),
       kids: kids.map(k => ({ id: k.id, name: k.name })),
-      schedule, overrides, appointments, pending: [], history: [], mailReady: false });
+      schedule, holidays, overrides, appointments, pending: [], history: [], mailReady: false });
   }
   // Parents: full view. Flag which kids have a login PIN set, for the settings screen.
   const kidsOut = kids.map(k => ({ id: k.id, name: k.name, hasPin: !!k.pin_hash }));
-  res.json({ role: 'parent', me: req.parentId, parents, kids: kidsOut, schedule, overrides,
+  res.json({ role: 'parent', me: req.parentId, parents, kids: kidsOut, schedule, holidays, overrides,
              appointments, pending, history, mailReady: mail.enabled, alerts: alertsFor(req.parentId),
              pushReady: push.enabled, pushPublicKey: push.enabled ? push.publicKey : null });
 });
@@ -748,6 +761,39 @@ app.post('/api/schedule', auth, parentOnly, (req, res) => {
   db.prepare(`INSERT INTO schedule (id, anchor_date, anchor_parent) VALUES (1,?,?)
               ON CONFLICT(id) DO UPDATE SET anchor_date = excluded.anchor_date, anchor_parent = excluded.anchor_parent`)
     .run(anchor_date, anchor_parent);
+  res.json({ ok: true });
+});
+
+// ---------- holiday schedule (supersedes the rotation) ----------
+app.post('/api/holidays', auth, parentOnly, (req, res) => {
+  const fid = req.body?.father_id ?? null;
+  if (fid !== null && !db.prepare('SELECT id FROM parents WHERE id = ?').get(fid))
+    return res.status(400).json({ error: 'Unknown parent' });
+  db.prepare(`INSERT INTO holiday_settings (id, father_id) VALUES (1,?)
+              ON CONFLICT(id) DO UPDATE SET father_id = excluded.father_id`).run(fid);
+  res.json({ ok: true });
+});
+
+// Christmas is split around the school's winter break, which changes every year.
+app.post('/api/school-breaks', auth, parentOnly, (req, res) => {
+  const { starts, resumes } = req.body || {};
+  const isDate = v => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+  if (!isDate(starts) || !isDate(resumes)) return res.status(400).json({ error: 'Both dates are required' });
+  // The break belongs to the Christmas it surrounds: it can start no later than Christmas Eve
+  // and school has to start back after it.
+  const year = +starts.slice(0, 4);
+  if (starts > `${year}-12-24` || starts < `${year}-11-01`)
+    return res.status(400).json({ error: 'The break has to begin between November and Christmas Eve' });
+  if (resumes <= `${year}-12-25` || resumes > `${year + 1}-02-15`)
+    return res.status(400).json({ error: 'School has to start back after Christmas' });
+  db.prepare(`INSERT INTO school_breaks (year, starts, resumes) VALUES (?,?,?)
+              ON CONFLICT(year) DO UPDATE SET starts = excluded.starts, resumes = excluded.resumes`)
+    .run(year, starts, resumes);
+  res.json({ ok: true, year });
+});
+
+app.delete('/api/school-breaks/:year', auth, parentOnly, (req, res) => {
+  db.prepare('DELETE FROM school_breaks WHERE year = ?').run(+req.params.year);
   res.json({ ok: true });
 });
 

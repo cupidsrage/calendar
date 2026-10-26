@@ -5,6 +5,21 @@ A shared custody calendar for two parents. Week-on/week-off schedule, appointmen
 ## Features
 - **Two-parent sign-in** — each parent has a name, color, email, and PIN. One-time setup on first visit.
 - **Custody calendar** — week-on/week-off rotation. Pick the exchange day and whose week it is now; it alternates automatically forever. One-off switches (dashed badge) don't affect the rotation.
+- **Holiday schedule** — the court-ordered holiday schedule (custody order ¶36) always overrides the regular weeks. Pick which parent is *Father* in ⚙ settings and every holiday is placed automatically, with its exact handover times:
+
+  | Holiday | Time | Father | Mother |
+  |---|---|---|---|
+  | Easter | 6 PM Fri – 6 PM Sun | even years | odd years |
+  | Mother's Day | 6 PM Fri – 6 PM Sun | | every year |
+  | Father's Day | 6 PM Fri – 6 PM Sun | every year | |
+  | Memorial Day | 6 PM Fri – 6 PM Mon | even years | odd years |
+  | Fourth of July | 10 AM Jul 4 – 10 AM Jul 5 | odd years | even years |
+  | Labor Day | 6 PM Fri – 6 PM Mon | even years | odd years |
+  | Thanksgiving | 6 PM Wed – 6 PM Sun | odd years | even years |
+  | Christmas, first half | 6 PM the day school holiday begins – 6 PM Christmas Eve | even years | odd years |
+  | Christmas, second half | 6 PM Christmas Eve – 6 PM the day before school starts back | odd years | even years |
+
+  Christmas depends on the school's winter break, so enter those two dates each year in settings — until you do, the Christmas split isn't shown. A day with a mid-day handover is split diagonally (morning parent top-left, overnight parent bottom-right), and the day sheet shows the holiday and the exchange time. An accepted day swap still wins over a holiday.
 - **Appointments, events & birthdays** — appointments have a responsible parent (and can be swapped); events can belong to one parent or both; birthdays repeat yearly and show the kid's age.
 - **Nothing lands on the other person without their OK.** Anything that puts an obligation on them is a *proposal* — it shows as pending (⏳) and doesn't take effect until they accept:
   - assigning them an appointment
